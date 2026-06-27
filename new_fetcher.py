@@ -473,14 +473,27 @@ def fetch_hideip():
             if text:
                 for line in text.strip().split('\n'):
                     line = line.strip().replace('\r', '')
-                    # hideip format: IP:port:Country — strip trailing :Country
-                    clean = line.rsplit(':') 
-                    if len(clean) >= 2:
-                        line = f'{clean[0]}:{clean[1]}'
+                    # hideip format: IP:port:Country — extract country
+                    parts = line.rsplit(':')
+                    country_name = ""
+                    if len(parts) >= 3:
+                        country_name = parts[-1].strip()
+                        line = f'{parts[0]}:{parts[1]}'
                     m = re.match(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)', line)
                     if m:
-                        if add_proxy(m.group(1), 'hideip', protocol=proto):
+                        addr = m.group(1)
+                        ip = addr.split(':')[0]
+                        if add_proxy(addr, 'hideip', protocol=proto):
                             count += 1
+                            # Inject source-provided geo
+                            if country_name and len(country_name) <= 30:
+                                try:
+                                    import geo
+                                    cc = geo._name_to_code(country_name)
+                                    if cc:
+                                        geo.inject_geo(ip, cc)
+                                except Exception:
+                                    pass
         except Exception:
             pass
     return count

@@ -1,242 +1,241 @@
 # -*- coding: utf-8 -*-
-"""GeoIP resolver — ip2region xdb, city-level for China, country for foreign."""
-import os, searcher, util
+"""GeoIP resolver — online APIs + Redis cache (no local DB).
 
-import threading
+resolve() / resolve_region() → Redis cache only (instant).
+Background thread: geo_fill() → batch-resolves uncached IPs via ip-api.com.
+Source-provided geo (hideip.me etc.) → inject_geo() → pre-populates cache.
+"""
 
-XDB_PATH = os.environ.get("IP2REGION_DB", "/app/ip2region.xdb")
-_searcher = None
-_init_lock = threading.Lock()
+import json, os, time, threading
+import redis
+import urllib.request
 
-PROVINCE_SHORT = {
-    "北京": "北京", "北京市": "北京", "上海": "上海", "上海市": "上海",
-    "天津": "天津", "天津市": "天津", "重庆": "重庆", "重庆市": "重庆",
-    "广东": "广东", "广东省": "广东", "浙江": "浙江", "浙江省": "浙江",
-    "江苏": "江苏", "江苏省": "江苏", "四川": "四川", "四川省": "四川",
-    "湖北": "湖北", "湖北省": "湖北", "山东": "山东", "山东省": "山东",
-    "福建": "福建", "福建省": "福建", "河南": "河南", "河南省": "河南",
-    "湖南": "湖南", "湖南省": "湖南", "河北": "河北", "河北省": "河北",
-    "安徽": "安徽", "安徽省": "安徽", "辽宁": "辽宁", "辽宁省": "辽宁",
-    "陕西": "陕西", "陕西省": "陕西", "江西": "江西", "江西省": "江西",
-    "广西": "广西", "广西壮族自治区": "广西",
-    "云南": "云南", "云南省": "云南", "贵州": "贵州", "贵州省": "贵州",
-    "山西": "山西", "山西省": "山西", "吉林": "吉林", "吉林省": "吉林",
-    "黑龙江": "黑龙江", "黑龙江省": "黑龙江", "甘肃": "甘肃", "甘肃省": "甘肃",
-    "海南": "海南", "海南省": "海南", "内蒙古": "内蒙古", "内蒙古自治区": "内蒙古",
-    "新疆": "新疆", "新疆维吾尔自治区": "新疆", "西藏": "西藏", "西藏自治区": "西藏",
-    "宁夏": "宁夏", "宁夏回族自治区": "宁夏", "青海": "青海", "青海省": "青海",
-}
-MUNICIPALITY = {"北京", "上海", "天津", "重庆", "香港", "澳门"}
+REDIS_HOST = os.environ.get("REDIS_HOST", "proxy-redis")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
+
+_r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=1, decode_responses=True)
+_lock = threading.Lock()
+
+GEO_TTL = 2592000  # 30 days
+
+# ── Country code → Chinese name (compact, essential) ──
 COUNTRY_CODE = {
-    "CN": "中国", "US": "美国", "JP": "日本", "KR": "韩国", "SG": "新加坡",
-    "DE": "德国", "GB": "英国", "FR": "法国", "CA": "加拿大", "AU": "澳大利亚",
-    "NL": "荷兰", "IN": "印度", "BR": "巴西", "RU": "俄罗斯", "VN": "越南",
-    "TH": "泰国", "MY": "马来西亚", "ID": "印尼", "PH": "菲律宾",
-    "TW": "台湾", "HK": "香港", "MO": "澳门", "SE": "瑞典", "CH": "瑞士",
-    "IT": "意大利", "ES": "西班牙", "PL": "波兰", "TR": "土耳其", "MX": "墨西哥",
-    "AR": "阿根廷", "AE": "阿联酋", "UA": "乌克兰", "CZ": "捷克", "AT": "奥地利",
-    "BE": "比利时", "DK": "丹麦", "FI": "芬兰", "NO": "挪威", "IE": "爱尔兰",
-    "PT": "葡萄牙", "IL": "以色列", "NZ": "新西兰", "GR": "希腊", "RO": "罗马尼亚",
-    "BG": "保加利亚", "HU": "匈牙利", "EG": "埃及", "SA": "沙特", "CO": "哥伦比亚",
-    "PK": "巴基斯坦", "BD": "孟加拉国", "KZ": "哈萨克斯坦", "PE": "秘鲁",
-    "ZA": "南非", "CL": "智利", "NG": "尼日利亚", "KE": "肯尼亚", "MA": "摩洛哥",
-    "DZ": "阿尔及利亚", "AO": "安哥拉", "ZM": "赞比亚", "ZW": "津巴布韦",
-    "ET": "埃塞俄比亚", "GH": "加纳", "TZ": "坦桑尼亚", "UG": "乌干达",
-    "CI": "科特迪瓦", "SN": "塞内加尔", "CM": "喀麦隆", "SD": "苏丹",
-    "TN": "突尼斯", "VE": "委内瑞拉", "EC": "厄瓜多尔", "BO": "玻利维亚",
-    "PY": "巴拉圭", "UY": "乌拉圭", "CR": "哥斯达黎加", "PA": "巴拿马",
-    "DO": "多米尼加", "GT": "危地马拉", "HN": "洪都拉斯", "NI": "尼加拉瓜",
-    "SV": "萨尔瓦多", "IR": "伊朗", "IQ": "伊拉克", "SY": "叙利亚",
-    "JO": "约旦", "LB": "黎巴嫩", "KW": "科威特", "QA": "卡塔尔",
-    "BH": "巴林", "OM": "阿曼", "YE": "也门", "LK": "斯里兰卡",
-    "NP": "尼泊尔", "MM": "缅甸", "KH": "柬埔寨", "LA": "老挝",
-    "MN": "蒙古", "AF": "阿富汗", "UZ": "乌兹别克斯坦",
-    "AZ": "阿塞拜疆", "LV": "拉脱维亚", "LT": "立陶宛", "EE": "爱沙尼亚",
-    "SK": "斯洛伐克", "SI": "斯洛文尼亚", "HR": "克罗地亚", "RS": "塞尔维亚",
-    "IS": "冰岛", "CY": "塞浦路斯", "MT": "马耳他", "LU": "卢森堡",
-    "MD": "摩尔多瓦", "GE": "格鲁吉亚", "AM": "亚美尼亚",
-    "FJ": "斐济", "PG": "巴布亚新几内亚",
-}
-# Reverse map: English country name → CN code
-_EN_TO_CODE = {
-    "united states": "US", "australia": "AU", "japan": "JP", "south korea": "KR",
-    "singapore": "SG", "germany": "DE", "united kingdom": "GB", "france": "FR",
-    "canada": "CA", "netherlands": "NL", "india": "IN", "brazil": "BR",
-    "russia": "RU", "vietnam": "VN", "thailand": "TH", "malaysia": "MY",
-    "indonesia": "ID", "philippines": "PH", "sweden": "SE", "switzerland": "CH",
-    "italy": "IT", "spain": "ES", "poland": "PL", "turkey": "TR", "mexico": "MX",
-    "argentina": "AR", "ukraine": "UA", "czech": "CZ", "austria": "AT",
-    "belgium": "BE", "denmark": "DK", "finland": "FI", "norway": "NO",
-    "ireland": "IE", "portugal": "PT", "israel": "IL", "greece": "GR",
-    "romania": "RO", "bulgaria": "BG", "hungary": "HU", "egypt": "EG",
-    "saudi arabia": "SA", "colombia": "CO", "pakistan": "PK",
-    "bangladesh": "BD", "kazakhstan": "KZ", "peru": "PE", "south africa": "ZA",
-    "chile": "CL", "nigeria": "NG", "kenya": "KE", "morocco": "MA",
-    "algeria": "DZ", "new zealand": "NZ",
+    "CN": "中国", "US": "美国", "JP": "日本", "KR": "韩国", "GB": "英国",
+    "DE": "德国", "FR": "法国", "CA": "加拿大", "AU": "澳大利亚", "RU": "俄罗斯",
+    "IN": "印度", "BR": "巴西", "ID": "印尼", "NG": "尼日利亚", "ZA": "南非",
+    "SG": "新加坡", "MY": "马来西亚", "TH": "泰国", "VN": "越南", "PH": "菲律宾",
+    "MM": "缅甸", "KH": "柬埔寨", "LA": "老挝", "BD": "孟加拉国", "PK": "巴基斯坦",
+    "IR": "伊朗", "TR": "土耳其", "SA": "沙特阿拉伯", "AE": "阿联酋",
+    "EG": "埃及", "KE": "肯尼亚", "TZ": "坦桑尼亚", "UG": "乌干达",
+    "GH": "加纳", "CI": "科特迪瓦", "SN": "塞内加尔",
+    "CM": "喀麦隆", "AO": "安哥拉", "ZM": "赞比亚", "ZW": "津巴布韦",
+    "DZ": "阿尔及利亚", "MA": "摩洛哥", "TN": "突尼斯",
+    "MX": "墨西哥", "AR": "阿根廷", "CO": "哥伦比亚", "VE": "委内瑞拉",
+    "CL": "智利", "PE": "秘鲁", "EC": "厄瓜多尔", "BO": "玻利维亚",
+    "PY": "巴拉圭", "UY": "乌拉圭", "CR": "哥斯达黎加",
+    "IT": "意大利", "ES": "西班牙", "NL": "荷兰", "BE": "比利时",
+    "SE": "瑞典", "CH": "瑞士", "PL": "波兰", "UA": "乌克兰",
+    "CZ": "捷克", "RO": "罗马尼亚", "HU": "匈牙利", "AT": "奥地利",
+    "PT": "葡萄牙", "GR": "希腊", "IE": "爱尔兰", "DK": "丹麦",
+    "FI": "芬兰", "NO": "挪威", "IL": "以色列",
+    "HK": "香港", "TW": "台湾", "MO": "澳门",
 }
 
-def _init():
-    global _searcher
-    if _searcher is not None:
-        return
-    with _init_lock:
-        if _searcher is not None:  # 双重检查
-            return
-        if not os.path.exists(XDB_PATH):
-            return
-        _searcher = searcher.new_with_file_only(util.IPv4, XDB_PATH)
-
-def resolve(ip):
-    """ip → '浙江 杭州' (China city) or '美国' (foreign country) or '?'"""
-    _init()
-    if _searcher is None or not ip:
-        return "?"
-    try:
-        result = _searcher.search(ip)
-        if not result:
-            return "?"
-        parts = result.split("|")
-        if len(parts) < 5:
-            return "?"
-        # ip2region 格式: 国家|区域|省份|城市|ISP
-        country, region, province, city, isp = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip(), parts[4].strip()
-
-        # Is it China?
-        is_china = country == "中国"
-        if is_china:
-            provinceshort = PROVINCE_SHORT.get(province)
-            if provinceshort:
-                prov = provinceshort
-            elif province and province != "0":
-                prov = province
-            else:
-                prov = ""
-            # 过滤 ISP 名混入省份字段
-            _isp_junk = ("阿里", "腾讯", "百度", "华为", "京东", "网易", "字节",
-                         "电信", "联通", "移动", "铁通", "广电", "教育网",
-                         "科技网", "长城", "方正", "歌华", "世纪互联",
-                         "cloud", "alibaba", "tencent", "aws", "azure")
-            if prov and any(j in prov.lower() for j in _isp_junk):
-                prov = ""
-
-            # If province is missing (ip2region returns "0"), show "中国"
-            if not prov:
-                c = city
-                # 检查 region 字段是否有 HK/TW/MO 信息
-                if region in ("香港特别行政区", "香港"):
-                    return "香港"
-                if region in ("台湾省", "台湾"):
-                    return "台湾"
-                if region in ("澳门特别行政区", "澳门"):
-                    return "澳门"
-                if c == "0":
-                    c = ""
-                if not c:
-                    return "中国"
-                # 过滤 ISP 名（city 字段混入的）
-                _isp_junk = ("阿里", "腾讯", "百度", "华为", "京东", "网易", "字节",
-                             "电信", "联通", "移动", "铁通", "广电", "教育网",
-                             "科技网", "长城", "方正", "歌华", "世纪互联",
-                             "cloud", "alibaba", "tencent", "aws", "azure")
-                if c and any(j in c.lower() for j in _isp_junk):
-                    c = ""
-                if not c:
-                    return "中国"
-                return c
-            # Normalize 香港/澳门/台湾 special regions
-            if prov in ("香港特别行政区",):
-                prov = "香港"
-                return prov
-            if prov in ("澳门特别行政区", "澳门"):
-                prov = "澳门"
-                return prov
-            if prov == "台湾省" or prov == "台湾":
-                prov = "台湾"
-                return prov
-            if prov in MUNICIPALITY:
-                return prov
-            # Strip administrative suffixes but keep 州 (it's part of city names: 杭州, 苏州, etc.)
-            # Only strip 州 if preceded by 自治 (自治州 suffix)
-            c = city
-            if c.endswith("自治州"):
-                c = c[:-3]
-            c = c.rstrip("区县市")
-            # 过滤 ISP 名混入城市字段（阿里/腾讯/百度/华为/电信/联通/移动）
-            _isp_junk = ("阿里", "腾讯", "百度", "华为", "京东", "网易", "字节",
-                         "电信", "联通", "移动", "铁通", "广电", "教育网",
-                         "科技网", "长城", "方正", "歌华", "世纪互联",
-                         "cloud", "alibaba", "tencent", "aws", "azure")
-            if c and any(j in c.lower() for j in _isp_junk):
-                c = ""
-            if not c or c == "0":
-                return prov
-            return f"{prov} {c}"
-        else:
-            # Foreign — resolve country name to Chinese
-            # Try province (parts[2]) first for HK/TW/MO as fallback
-            if province in ("香港特别行政区", "香港"):
-                return "香港"
-            if province in ("台湾省", "台湾"):
-                return "台湾"
-            if province in ("澳门特别行政区", "澳门"):
-                return "澳门"
-            # Foreign — ip2region v4 自带 ISO 码在 parts[4]
-            iso = parts[4].strip().upper() if len(parts) > 4 else ""
-            if iso and len(iso) == 2:
-                cn_name = COUNTRY_CODE.get(iso)
-                if cn_name:
-                    return cn_name
-                return iso
-            # 兜底：英文名反查
-            code = _EN_TO_CODE.get(country.lower())
-            if code:
-                return COUNTRY_CODE.get(code, country)
-            return country if country and country != "0" else "?"
-    except Exception:
-        return "?"
 
 def resolve_region(ip):
-    """ip → 'CN' / 'US' / 'JP' etc"""
-    _init()
-    if _searcher is None or not ip:
-        return "?"
-    try:
-        result = _searcher.search(ip)
-        if not result:
-            return "?"
-        parts = result.split("|")
-        if len(parts) < 5:
-            return "?"
-        # ip2region 格式: 国家|区域|省份|城市|ISP
-        country = parts[0].strip()
-        region = parts[1].strip()
-        province = parts[2].strip()
-        # HK/TW/MO — check BOTH province AND region fields
-        hk_tw_mo = province
-        if not hk_tw_mo or hk_tw_mo == "0":
-            hk_tw_mo = region
-        if hk_tw_mo in ("香港特别行政区", "香港"):
-            return "HK"
-        if hk_tw_mo in ("台湾省", "台湾"):
-            return "TW"
-        if hk_tw_mo in ("澳门特别行政区", "澳门"):
-            return "MO"
-        # China
-        if country == "中国":
-            return "CN"
-        # Foreign — ip2region v4 自带 ISO 码在 parts[4]
-        iso = parts[4].strip().upper() if len(parts) > 4 else ""
-        if iso and len(iso) == 2 and iso.isalpha():
-            return iso
-        # 兜底：英文名反查
-        code = _EN_TO_CODE.get(country.lower())
-        return code if code else "?"
-    except Exception:
-        return "?"
+    """Return ISO country code (cached only, instant)."""
+    data = _cached(ip)
+    return data.get("countryCode", "?") if data else "?"
 
-if __name__ == "__main__":
-    tests = ["8.8.8.8", "1.1.1.1", "223.5.5.5", "120.26.123.95", 
-             "121.43.102.172", "47.96.42.30", "112.28.149.156", 
-             "47.121.182.36", "77.88.55.80", "103.235.46.39"]
-    for ip in tests:
-        print(f"{ip:20s} → {resolve(ip):12s}  [{resolve_region(ip)}]")
+
+def resolve(ip):
+    """Return Chinese location name (cached only, instant)."""
+    data = _cached(ip)
+    if not data or data.get("_placeholder"):
+        return "..."
+
+    cc = data.get("countryCode", "")
+    if cc in ("HK", "TW", "MO"):
+        return COUNTRY_CODE.get(cc, data.get("country", "?"))
+
+    if cc == "CN":
+        prov = data.get("regionName", "")
+        city = data.get("city", "")
+        _junk = ("阿里", "腾讯", "百度", "华为", "电信", "联通", "移动", "云")
+        if city and any(j in city for j in _junk):
+            city = ""
+        # Filter non-Chinese city names (ip-api.com sometimes returns English network names)
+        if city:
+            has_cjk = any('\u4e00' <= c <= '\u9fff' for c in city)
+            if not has_cjk and any(c.isascii() and c.isalpha() for c in city):
+                city = ""
+        if prov and city:
+            return f"{prov}{city}"
+        if prov:
+            return prov
+        if city:
+            return city
+        return "中国"
+
+    return COUNTRY_CODE.get(cc, data.get("country", "?"))
+
+
+def _cached(ip):
+    """Redis cache lookup. Returns None if not cached."""
+    if not ip or ip == "0.0.0.0":
+        return None
+    try:
+        raw = _r.get(f"geo:{ip}")
+        if raw:
+            return json.loads(raw)
+    except (json.JSONDecodeError, Exception):
+        pass
+    return None
+
+
+def inject_geo(ip, country_code, country_name="", region="", city=""):
+    """Inject source-provided geo data into cache."""
+    data = {
+        "country": country_name or COUNTRY_CODE.get(country_code, country_code),
+        "countryCode": country_code,
+        "regionName": region,
+        "city": city,
+        "query": ip,
+        "source": "injected",
+    }
+    try:
+        _r.setex(f"geo:{ip}", GEO_TTL, json.dumps(data, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+# ── Background geo filler ──
+_FILL_INTERVAL = 120  # seconds between fill cycles
+_fill_thread = None
+_fill_running = False
+
+
+def start_filler():
+    """Start background thread that fills missing geo data."""
+    global _fill_thread, _fill_running
+    if _fill_running:
+        return
+    _fill_running = True
+    _fill_thread = threading.Thread(target=_fill_loop, daemon=True)
+    _fill_thread.start()
+
+
+def _fill_loop():
+    while _fill_running:
+        try:
+            _fill_cycle()
+        except Exception:
+            pass
+        time.sleep(_FILL_INTERVAL)
+
+
+def _fill_cycle():
+    """One fill cycle: collect uncached IPs → batch resolve → cache."""
+    # Collect IPs from pool that have no geo cache
+    uncached = []
+    try:
+        # Scan pool members
+        for member in _r.zscan_iter("proxies:pool"):
+            ip = member[0].split(":")[0] if ":" in member[0] else member[0]
+            if not _r.exists(f"geo:{ip}"):
+                uncached.append(ip)
+    except Exception:
+        return
+
+    if not uncached:
+        return
+
+    # Batch resolve via ip-api.com (45 IPs/min)
+    batch_size = 45
+    resolved = 0
+    for i in range(0, len(uncached), batch_size):
+        batch = uncached[i : i + batch_size]
+        try:
+            payload = json.dumps([{"query": ip} for ip in batch])
+            req = urllib.request.Request(
+                "http://ip-api.com/batch?lang=zh-CN",
+                data=payload.encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            resp = urllib.request.urlopen(req, timeout=15)
+            raw = json.loads(resp.read().decode())
+            for item in raw:
+                ip = item.get("query", "")
+                if item.get("status") == "success":
+                    _r.setex(f"geo:{ip}", GEO_TTL, json.dumps(item, ensure_ascii=False))
+                    resolved += 1
+                else:
+                    # Mark as failed to avoid retry on every cycle
+                    _r.setex(f"geo:{ip}", GEO_TTL, json.dumps({"_placeholder": True, "query": ip}))
+            time.sleep(60)  # rate limit: 45/min
+        except Exception:
+            time.sleep(10)
+
+    # Also try ip2location.io for any still-uncached
+    remaining = [ip for ip in uncached if not _r.exists(f"geo:{ip}")]
+    for i in range(0, len(remaining), 45):
+        batch = remaining[i : i + 45]
+        for ip in batch:
+            try:
+                req = urllib.request.Request(f"https://api.ip2location.io/?ip={ip}")
+                resp = urllib.request.urlopen(req, timeout=5)
+                data = json.loads(resp.read().decode())
+                _r.setex(
+                    f"geo:{ip}",
+                    GEO_TTL,
+                    json.dumps({
+                        "status": "success",
+                        "country": data.get("country_name", ""),
+                        "countryCode": data.get("country_code", ""),
+                        "regionName": data.get("region_name", ""),
+                        "city": data.get("city_name", ""),
+                        "query": ip,
+                        "source": "ip2lio",
+                    }, ensure_ascii=False),
+                )
+                resolved += 1
+            except Exception:
+                pass
+
+
+# ── Backward compat stubs ──
+def _init():
+    start_filler()
+_searcher = None
+
+
+# ── Source geo injection helpers ──
+def _name_to_code(name):
+    """Map country name → ISO code."""
+    name = name.strip().lower()
+    if len(name) == 2 and name.upper() in COUNTRY_CODE:
+        return name.upper()
+    mapping = {
+        "united states": "US", "usa": "US", "us": "US",
+        "china": "CN", "russia": "RU", "france": "FR",
+        "germany": "DE", "japan": "JP", "korea": "KR",
+        "united kingdom": "GB", "uk": "GB", "england": "GB",
+        "canada": "CA", "australia": "AU", "brazil": "BR",
+        "india": "IN", "indonesia": "ID", "singapore": "SG",
+        "netherlands": "NL", "holland": "NL",
+        "sweden": "SE", "switzerland": "CH", "spain": "ES",
+        "italy": "IT", "poland": "PL", "ukraine": "UA",
+        "taiwan": "TW", "hong kong": "HK", "hongkong": "HK",
+        "iran": "IR", "turkey": "TR", "thailand": "TH",
+        "vietnam": "VN", "malaysia": "MY", "philippines": "PH",
+        "mexico": "MX", "argentina": "AR", "colombia": "CO",
+        "chile": "CL", "peru": "PE", "egypt": "EG",
+        "south africa": "ZA", "south korea": "KR",
+        "czech": "CZ", "romania": "RO", "hungary": "HU",
+        "austria": "AT", "portugal": "PT", "greece": "GR",
+        "ireland": "IE", "denmark": "DK", "finland": "FI",
+        "norway": "NO", "belgium": "BE", "israel": "IL",
+        "uae": "AE", "saudi": "SA", "pakistan": "PK",
+        "bangladesh": "BD", "nigeria": "NG", "kenya": "KE",
+    }
+    return mapping.get(name)

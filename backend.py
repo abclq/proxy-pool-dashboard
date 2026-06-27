@@ -2,10 +2,14 @@
 """backend — pure API, port 5051. GeoIP via ip2region."""
 import json, os, time, urllib.parse, hashlib, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 import redis, sys
 
 sys.path.insert(0, "/app")
 import geo
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
 HOST = os.environ.get("REDIS_HOST", "proxy-redis")
 r0 = redis.Redis(host=HOST, port=6379, db=0, decode_responses=True)
@@ -168,4 +172,10 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print("API on :5051")
-    HTTPServer(("0.0.0.0", 5051), H).serve_forever()
+    # Pre-warm cache
+    t0 = time.time()
+    load()
+    print(f"Cache ready in {time.time()-t0:.1f}s")
+    # Start background geo filler (online API)
+    geo._init()
+    ThreadingHTTPServer(("0.0.0.0", 5051), H).serve_forever()
