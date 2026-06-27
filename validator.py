@@ -99,7 +99,7 @@ def harvest_new_proxies():
         import subprocess
         result = subprocess.run(
             [sys.executable, fetcher_path],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=300,
             env={**os.environ, "REDIS_HOST": os.environ.get("REDIS_HOST", "proxy-redis")}
         )
         # C6: 检查 returncode

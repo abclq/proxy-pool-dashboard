@@ -6,7 +6,7 @@ def cleanup():
         except: pass
 signal.signal(signal.SIGTERM, lambda *a: cleanup())
 signal.signal(signal.SIGINT, lambda *a: cleanup())
-# use current workdir
+os.chdir('/app')
 print('Starting validator...')
 p3 = subprocess.Popen([sys.executable, '-u', 'validator.py'])
 processes.append(p3)
