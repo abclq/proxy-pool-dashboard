@@ -2,8 +2,11 @@
 """GeoIP resolver — ip2region xdb, city-level for China, country for foreign."""
 import os, searcher, util
 
-XDB_PATH = os.environ.get("IP2REGION_DB", os.path.join(os.path.dirname(__file__), "data", "ip2region.xdb"))
+import threading
+
+XDB_PATH = os.environ.get("IP2REGION_DB", "/app/ip2region.xdb")
 _searcher = None
+_init_lock = threading.Lock()
 
 PROVINCE_SHORT = {
     "北京": "北京", "北京市": "北京", "上海": "上海", "上海市": "上海",
@@ -61,9 +64,12 @@ def _init():
     global _searcher
     if _searcher is not None:
         return
-    if not os.path.exists(XDB_PATH):
-        return
-    _searcher = searcher.new_with_file_only(util.IPv4, XDB_PATH)
+    with _init_lock:
+        if _searcher is not None:  # 双重检查
+            return
+        if not os.path.exists(XDB_PATH):
+            return
+        _searcher = searcher.new_with_file_only(util.IPv4, XDB_PATH)
 
 def resolve(ip):
     """ip → '浙江 杭州' (China city) or '美国' (foreign country) or '?'"""
@@ -77,10 +83,11 @@ def resolve(ip):
         parts = result.split("|")
         if len(parts) < 5:
             return "?"
-        country, province, city, isp, cc = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3], parts[4].strip()
-        
+        # ip2region 格式: 国家|区域|省份|城市|ISP
+        country, region, province, city, isp = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip(), parts[4].strip()
+
         # Is it China?
-        is_china = country == "中国" or cc == "CN"
+        is_china = country == "中国"
         if is_china:
             provinceshort = PROVINCE_SHORT.get(province)
             if provinceshort:
@@ -89,7 +96,7 @@ def resolve(ip):
                 prov = province
             else:
                 prov = ""
-            
+
             # If province is missing (ip2region returns "0"), show "中国"
             if not prov:
                 c = city
@@ -116,16 +123,20 @@ def resolve(ip):
                 return prov
             return f"{prov} {c}"
         else:
-            # Foreign — use COUNTRY_CODE lookup by code, then try English name
-            cn = COUNTRY_CODE.get(cc)
-            if cn:
-                return cn
-            # Try English name → code → Chinese
+            # Foreign — resolve country name to Chinese
+            # Try province (parts[2]) first for HK/TW/MO as fallback
+            if province in ("香港特别行政区", "香港"):
+                return "香港"
+            if province in ("台湾省", "台湾"):
+                return "台湾"
+            if province in ("澳门特别行政区", "澳门"):
+                return "澳门"
+            # Try country name mapping
             code = _EN_TO_CODE.get(country.lower())
             if code:
                 return COUNTRY_CODE.get(code, country)
             return country if country and country != "0" else "?"
-    except:
+    except Exception:
         return "?"
 
 def resolve_region(ip):
@@ -140,22 +151,23 @@ def resolve_region(ip):
         parts = result.split("|")
         if len(parts) < 5:
             return "?"
-        cc = parts[4].strip()
-        # HK/TW/MO are under CN in ip2region — override
-        province_raw = parts[1].strip()
-        if province_raw in ("香港特别行政区", "香港"):
-            return "HK"
-        if province_raw in ("台湾省", "台湾"):
-            return "TW"
-        if province_raw in ("澳门特别行政区", "澳门"):
-            return "MO"
-        if cc and cc != "0":
-            return cc
-        # Try English name
+        # ip2region 格式: 国家|区域|省份|城市|ISP
         country = parts[0].strip()
+        province = parts[2].strip()
+        # HK/TW/MO are under CN in ip2region — override
+        if province in ("香港特别行政区", "香港"):
+            return "HK"
+        if province in ("台湾省", "台湾"):
+            return "TW"
+        if province in ("澳门特别行政区", "澳门"):
+            return "MO"
+        # China
+        if country == "中国":
+            return "CN"
+        # Foreign — try English name → code
         code = _EN_TO_CODE.get(country.lower())
         return code if code else "?"
-    except:
+    except Exception:
         return "?"
 
 if __name__ == "__main__":

@@ -50,10 +50,10 @@ while True:
                 print(f"[dashboard] backoff {delay:.0f}s before restart (attempt #{restart_count})")
                 time.sleep(delay)
 
-                # Reap any zombie children of the dead process
+                # Reap any zombie children
                 try:
                     while True:
-                        wpid, _ = os.waitpid(-p.pid, os.WNOHANG)
+                        wpid, _ = os.waitpid(-1, os.WNOHANG)
                         if wpid == 0:
                             break
                 except ChildProcessError:

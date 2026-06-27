@@ -36,7 +36,7 @@ def geo_lookup(ip):
             city = parts[3] or "unknown"
             is_cn = country == "中国"
             return f"{country}|{region}|{city}", is_cn
-    except:
+    except Exception:
         pass
     return "unknown|unknown|unknown", False
 
@@ -79,12 +79,23 @@ def _load_proxies():
     PROXY_CACHE = []
     try:
         members = REDIS.zrange(KEY_POOL, 0, 200)
+        if not members:
+            return
+        # pipeline 批量 HGETALL — 1 次往返替代 N 次 HGET
+        pipe = REDIS.pipeline(transaction=False)
         for m in members:
-            proto = REDIS.hget(PFX_PROXY + m, "protocol") or ""
-            lat = REDIS.hget(PFX_PROXY + m, "latency") or "0"
+            pipe.hgetall(PFX_PROXY + m)
+        metas = pipe.execute()
+        for m, meta in zip(members, metas):
+            proto = (meta or {}).get(b"protocol", b"") if isinstance(meta, dict) else b""
+            if isinstance(proto, bytes):
+                proto = proto.decode()
+            lat = (meta or {}).get(b"latency", b"0") if isinstance(meta, dict) else "0"
+            if isinstance(lat, bytes):
+                lat = lat.decode()
             if "http" in proto and lat.isdigit() and int(lat) > 0:
                 PROXY_CACHE.append(m)
-    except:
+    except Exception:
         pass
     PROXY_CACHE_TS = now
 
@@ -110,16 +121,21 @@ def fetch(url, timeout=12, json_response=False, use_proxy=False):
     if result is not None:
         return result
 
-    # try with proxy
+    # try with proxy — 并行试前 5 个代理，第一个成功即返回
     _load_proxies()
     if not PROXY_CACHE:
         return None
 
+    import concurrent.futures as cf
     random.shuffle(PROXY_CACHE)
-    for proxy in PROXY_CACHE[:10]:
-        result = _do_fetch(proxy)
-        if result is not None:
-            return result
+    candidates = PROXY_CACHE[:5]  # 并行试 5 个
+    with cf.ThreadPoolExecutor(max_workers=min(3, len(candidates))) as px:
+        futures = {px.submit(_do_fetch, p): p for p in candidates}
+        for f in cf.as_completed(futures):
+            result = f.result()
+            if result is not None:
+                px.shutdown(wait=False, cancel_futures=True)
+                return result
 
     return None
 
@@ -234,7 +250,7 @@ def fetch_openproxylist():
                 for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
                     if add_proxy(f'{m.group(1)}:{m.group(2)}', 'openproxylist', protocol=proto):
                         count += 1
-        except:
+        except Exception:
             pass
     return count
 
@@ -252,7 +268,7 @@ def fetch_murongpig():
                 for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
                     if add_proxy(f'{m.group(1)}:{m.group(2)}', src, protocol=proto):
                         count += 1
-        except:
+        except Exception:
             pass
     return count
 
@@ -269,7 +285,7 @@ def fetch_vmheaven():
                 for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
                     if add_proxy(f'{m.group(1)}:{m.group(2)}', 'vmheaven', protocol=proto):
                         count += 1
-        except:
+        except Exception:
             pass
     return count
 
@@ -281,7 +297,7 @@ def fetch_jetkai():
             for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
                 if add_proxy(f'{m.group(1)}:{m.group(2)}', 'jetkai'):
                     count += 1
-    except:
+    except Exception:
         pass
     return count
 
@@ -293,7 +309,7 @@ def fetch_proxifly_gh():
             for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
                 if add_proxy(f'{m.group(1)}:{m.group(2)}', 'proxifly-gh'):
                     count += 1
-    except:
+    except Exception:
         pass
     return count
 
@@ -307,7 +323,7 @@ def fetch_jiliu():
                     if add_proxy(f'{m.group(1)}:{m.group(2)}', 'jiliu'):
                         count += 1
             time.sleep(1)
-        except:
+        except Exception:
             pass
     return count
 
@@ -319,7 +335,7 @@ def fetch_qiyun():
             for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+)[^\d]+(\d+)', html):
                 if add_proxy(f'{m.group(1)}:{m.group(2)}', 'qiyun'):
                     count += 1
-    except:
+    except Exception:
         pass
     return count
 
@@ -342,7 +358,7 @@ def fetch_vpslabcloud():
                         if m:
                             if add_proxy(m.group(1), 'vpslab', protocol=proto):
                                 count += 1
-        except:
+        except Exception:
             pass
     return count
 
@@ -362,7 +378,7 @@ def fetch_iplocate():
                         proto = 'http'
                     if add_proxy(proxy, 'iplocate', protocol=proto):
                         count += 1
-    except:
+    except Exception:
         pass
     return count
 
@@ -384,7 +400,7 @@ def fetch_databay():
                     if m:
                         if add_proxy(m.group(1), 'databay', protocol=proto):
                             count += 1
-        except:
+        except Exception:
             pass
     return count
 

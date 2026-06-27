@@ -29,7 +29,7 @@ try:
     from searcher import new_with_file_only
     from util import IPv4
     SEARCHER = new_with_file_only(IPv4, os.path.join(os.path.dirname(__file__), "data", "ip2region.xdb"))
-except:
+except Exception:
     SEARCHER = None
 
 def geo(ip):
@@ -40,20 +40,28 @@ def geo(ip):
         if r and "|" in r:
             parts = r.split("|")
             return parts[0], parts[-1]
-    except:
+    except Exception:
         pass
     return "unknown", "unknown"
 
 # ── 信用分 ──
+# Lua 脚本：原子化 credit_add（zincrby→zrem→delete）
+CREDIT_SCRIPT = REDIS.register_script("""
+    local s = redis.call('ZINCRBY', KEYS[1], ARGV[1], ARGV[2])
+    if s < 0 then
+        redis.call('ZREM', KEYS[1], ARGV[2])
+        redis.call('DEL', KEYS[2] .. ARGV[2])
+        return 1
+    end
+    if s > tonumber(ARGV[3]) then
+        redis.call('ZADD', KEYS[1], ARGV[3], ARGV[2])
+    end
+    return 0
+""")
+
 def credit_add(proxy, delta):
-    s = REDIS.zincrby(KEY_POOL, delta, proxy)
-    if (s or 0) < 0:
-        REDIS.zrem(KEY_POOL, proxy)
-        REDIS.delete(f"{PFX_PROXY}{proxy}")
-        return True
-    if s and s > CREDIT_MAX:
-        REDIS.zadd(KEY_POOL, {proxy: CREDIT_MAX})
-    return False
+    """原子化加减分，防并发竞态"""
+    return CREDIT_SCRIPT(keys=[KEY_POOL, PFX_PROXY], args=[delta, proxy, CREDIT_MAX]) == 1
 
 def proxy_count():
     return REDIS.zcard(KEY_POOL) or 0
@@ -250,7 +258,7 @@ def validate_all(executor):
                     if now_ts - ts < skip_sec:
                         skipped += 1
                         continue
-                except:
+                except Exception:
                     pass
             to_check.append((p, meta))
 
@@ -273,7 +281,7 @@ def validate_all(executor):
                 results["removed"] += 1
             elif status == "fail":
                 results["fail"] += 1
-        except:
+        except Exception:
             results["fail"] += 1
 
     print(f"[validate] checked={checked} skipped={results['skipped_total']} "

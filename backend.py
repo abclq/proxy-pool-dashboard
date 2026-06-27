@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """backend — pure API, port 5051. GeoIP via ip2region."""
-import json, os, time, urllib.parse, hashlib
+import json, os, time, urllib.parse, hashlib, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import redis, sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, "/app")
 import geo
 
 HOST = os.environ.get("REDIS_HOST", "proxy-redis")
@@ -13,11 +13,13 @@ r1 = redis.Redis(host=HOST, port=6379, db=1, decode_responses=True)
 PER_PAGE = 50
 
 _cache = {"t": 0, "d": []}
+_cache_lock = threading.Lock()
 
 def load():
     now = time.time()
-    if now - _cache["t"] < 30:
-        return _cache["d"]
+    with _cache_lock:
+        if now - _cache["t"] < 30:
+            return _cache["d"]
     # DB0: source/anon/https from jhao104 use_proxy hash
     jhao = {}
     for f, v in r0.hscan_iter("use_proxy"):
@@ -61,8 +63,9 @@ def load():
                     "is_china": region_code == "CN",
                 })
             pipe = r1.pipeline(transaction=False)
-    _cache["d"] = result
-    _cache["t"] = now
+    with _cache_lock:
+        _cache["d"] = result
+        _cache["t"] = now
     return result
 
 class H(BaseHTTPRequestHandler):
@@ -99,7 +102,7 @@ class H(BaseHTTPRequestHandler):
                 if delay_f:
                     try:
                         if px["delay"] > float(delay_f): continue
-                    except: pass
+                    except Exception: pass
                 if search and search not in px["ip"]: continue
                 if location_f and location_f.lower() not in px["location"].lower(): continue
                 filtered.append(px)
@@ -108,15 +111,19 @@ class H(BaseHTTPRequestHandler):
             sort_asc = q.get("order", ["asc"])[0] != "desc"
             try:
                 if sort_by == "delay":
-                    filtered.sort(key=lambda x: x.get("delay", 99999) or 99999, reverse=not sort_asc)
+                    filtered.sort(key=lambda x: x.get("delay") if x.get("delay", -1) >= 0 else 99999, reverse=not sort_asc)
                 elif sort_by == "grade":
                     og = {"s": 0, "a": 1, "b": 2, "c": 3}
                     filtered.sort(key=lambda x: og.get(x.get("grade","c"), 3), reverse=not sort_asc)
-            except: pass
-            try: page = max(1, int(q.get("page", ["1"])[0]))
-            except: page = 1
-            try: limit = min(int(q.get("limit", [str(PER_PAGE)])[0]), 200)
-            except: limit = PER_PAGE
+            except Exception: pass
+            try:
+                page = max(1, int(q.get("page", ["1"])[0]))
+            except Exception:
+                page = 1
+            try:
+                limit = min(int(q.get("limit", [str(PER_PAGE)])[0]), 200)
+            except Exception:
+                limit = PER_PAGE
             start = (page - 1) * limit
             body = {
                 "total": len(proxies),
