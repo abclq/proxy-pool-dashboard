@@ -99,9 +99,23 @@ docker-compose up -d
 | HTML表格 | Free-Proxy-List, SSLProxies, US-Proxy, Socks-Proxy |
 | 国内 | 快代理, ip3366, 积流, 齐云 |
 
-### import_github_proxies.py (35源)
+### import_github_proxies.py (13仓库 / 35 raw list)
 
-从 TheSpeedX、ShiftyTR、sunny9577、roosterkid、monosans 等 35 个 GitHub 仓库批量导入。
+| 仓库 | ⭐ | 更新频率 |
+|------|:--:|------|
+| TheSpeedX/PROXY-List | 5647 | 每日 |
+| monosans/proxy-list | 1431 | 带地理位置 |
+| hookzof/socks5_list | 999 | Telegram 代理 |
+| roosterkid/openproxylist | 862 | 每小时 |
+| jetkai/proxy-list | 645 | 自动更新 |
+| sunny9577/proxy-scraper | 584 | 每 3 小时 |
+| ShiftyTR/Proxy-List | 579 | 每小时 |
+| mmpx12/proxy-list | 432 | 免费代理 |
+| vakhov/fresh-proxy-list | 356 | 新鲜代理 |
+| ALIILAPRO/Proxy | 187 | 每小时 |
+| themiralay/Proxy-List-World | 166 | ICE 代理采集 |
+| rdavydov/proxy-list | 113 | 每 30 分钟 |
+| mertguvencli/http-proxy-list | — | HTTP 代理 |
 
 > 完整列表见 [proxy-pool-tools](https://github.com/abclq/proxy-pool-tools)
 
