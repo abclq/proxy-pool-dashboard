@@ -7,13 +7,19 @@ KEY_POOL = "proxies:pool"
 PFX_PROXY = "proxy:"
 CHECK_INTERVAL = 30          # 每轮验证间隔
 HARVEST_INTERVAL = 300       # 采集间隔 (5分钟)
-VALIDATE_THREADS = 50        # 验证线程数 (Redis 连接上限)
+VALIDATE_THREADS = 50        # 验证线程数
 VALIDATE_TIMEOUT = 5         # 超时秒数
 CREDIT_MAX = 100
+SUBMIT_CHUNK = 1000          # 分批提交大小，防内存爆炸
 
-REDIS = redis.Redis(host=os.environ.get("REDIS_HOST", "proxy-redis"), port=6379, db=1, decode_responses=True,
-                     socket_connect_timeout=5, socket_timeout=5,
-                     max_connections=VALIDATE_THREADS + 10)
+# C1: 正确使用 ConnectionPool
+POOL = redis.ConnectionPool(
+    host=os.environ.get("REDIS_HOST", "proxy-redis"), port=6379, db=1,
+    max_connections=VALIDATE_THREADS + 10,
+    socket_connect_timeout=5, socket_timeout=5,
+    decode_responses=True,
+)
+REDIS = redis.Redis(connection_pool=POOL)
 
 # ── GeoIP ──
 try:
@@ -31,7 +37,7 @@ def geo(ip):
         r = SEARCHER.search(ip)
         if r and "|" in r:
             parts = r.split("|")
-            return parts[0], parts[-1]  # country, code
+            return parts[0], parts[-1]
     except:
         pass
     return "unknown", "unknown"
@@ -53,23 +59,23 @@ def proxy_count():
 # ── HTTP 探活 ──
 def http_test(ip, port):
     """HEAD 请求 qq.com, 返回延迟 ms 或 None"""
+    # C2: context manager 防 socket 泄漏
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(VALIDATE_TIMEOUT)
-        t0 = time.time()
-        s.connect((ip, int(port)))
-        s.send(b"HEAD / HTTP/1.1\r\nHost: www.qq.com\r\nConnection: close\r\n\r\n")
-        resp = b""
-        while True:
-            try:
-                chunk = s.recv(4096)
-                if not chunk: break
-                resp += chunk
-            except: break
-        s.close()
-        lat = int((time.time() - t0) * 1000)
-        if b"HTTP/" in resp:
-            return min(lat, 9999)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(VALIDATE_TIMEOUT)
+            t0 = time.time()
+            s.connect((ip, int(port)))
+            s.send(b"HEAD / HTTP/1.1\r\nHost: www.qq.com\r\nConnection: close\r\n\r\n")
+            resp = b""
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                    if not chunk: break
+                    resp += chunk
+                except: break
+            lat = int((time.time() - t0) * 1000)
+            if b"HTTP/" in resp:
+                return min(lat, 9999)
     except:
         pass
     return None
@@ -90,15 +96,16 @@ def harvest_new_proxies():
             print("[harvest] fetcher not found, skip")
             return 0
 
-        # 用子进程隔离执行，避免 exec + 全局变量污染
         import subprocess
         result = subprocess.run(
             [sys.executable, fetcher_path],
             capture_output=True, text=True, timeout=120,
             env={**os.environ, "REDIS_HOST": os.environ.get("REDIS_HOST", "proxy-redis")}
         )
+        # C6: 检查 returncode
+        if result.returncode != 0:
+            print(f"[harvest] subprocess exit={result.returncode}")
         if result.stdout:
-            # 只打最后5行，避免刷屏
             lines = result.stdout.strip().split("\n")
             for line in lines[-5:]:
                 print(f"[harvest] {line}")
@@ -111,15 +118,25 @@ def harvest_new_proxies():
         print(f"[harvest] error: {e}")
         return 0
 
-# ── 验证线程池 ──
-def validate_one(proxy_str):
-    """单代理验证，返回结果 tuple 而非共享写"""
-    meta = REDIS.hgetall(f"{PFX_PROXY}{proxy_str}")
+# ── 验证核心 ──
+def validate_one(proxy_str, meta):
+    """单代理验证 — meta 由上层传入避免二次 HGETALL"""
     if not meta:
         return ("skipped", None)
 
-    ip = meta.get("ip", proxy_str.split(":")[0])
-    port = int(meta.get("port", proxy_str.split(":")[1]))
+    ip = meta.get("ip", "")
+    port_str = meta.get("port", "")
+    if not ip:
+        ip = proxy_str.split(":")[0]
+    if not port_str:
+        # C5: 防御性解析
+        parts = proxy_str.split(":")
+        port_str = parts[1] if len(parts) > 1 else "0"
+
+    try:
+        port = int(port_str)
+    except (ValueError, TypeError):
+        return ("skipped", None)
 
     lat = http_test(ip, port)
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -139,62 +156,68 @@ def validate_one(proxy_str):
         return ("removed" if removed else "fail", None)
 
 def validate_all(executor):
-    """多线程验证全部代理，跳过最近已验证的 — 复用外部 executor"""
+    """多线程验证全部代理"""
     proxies = REDIS.zrange(KEY_POOL, 0, -1)
     total = len(proxies)
     if total == 0:
         print("[validate] pool empty")
         return
 
-    now = time.time()
+    results = {"ok": 0, "fail": 0, "removed": 0, "skipped_total": 0,
+               "grades": {"S": 0, "A": 0, "B": 0, "C": 0}}
+    now_ts = time.time()
+
+    # Submit all tasks — executor handles queue with 50 workers
     to_check = []
     skipped = 0
-    for p in proxies:
-        meta = REDIS.hgetall(f"{PFX_PROXY}{p}")
-        if not meta:
-            to_check.append(p)
-            continue
-        lc = meta.get("last_check", "")
-        lat = meta.get("latency", "")
-        # 有延迟且5分钟内验过的跳过
-        if lat and lat not in ("9999", "", "0") and lc:
-            try:
-                ts = datetime.datetime.strptime(lc, "%Y-%m-%d %H:%M:%S").timestamp()
-                grade = grade_for_latency(float(lat))
-                skip_sec = {"S": 300, "A": 120, "B": 120, "C": 60}.get(grade, 60)
-                if now - ts < skip_sec:
-                    skipped += 1
-                    continue
-            except:
-                pass
-        to_check.append(p)
+    for i in range(0, total, SUBMIT_CHUNK):
+        chunk = proxies[i:i + SUBMIT_CHUNK]
+        pipe = REDIS.pipeline(transaction=False)
+        for p in chunk:
+            pipe.hgetall(f"{PFX_PROXY}{p}")
+        metas = pipe.execute()
+
+        for p, meta in zip(chunk, metas):
+            if not meta:
+                to_check.append((p, meta))
+                continue
+            lc = meta.get("last_check", "")
+            lat = meta.get("latency", "")
+            if lat and lat not in ("9999", "", "0") and lc:
+                try:
+                    ts = datetime.datetime.strptime(lc, "%Y-%m-%d %H:%M:%S").timestamp()
+                    grade = grade_for_latency(float(lat))
+                    skip_sec = {"S": 300, "A": 120, "B": 120, "C": 60}.get(grade, 60)
+                    if now_ts - ts < skip_sec:
+                        skipped += 1
+                        continue
+                except:
+                    pass
+            to_check.append((p, meta))
+
+    results["skipped_total"] = skipped
+    print(f"[validate] {total} total → skip={skipped} check={len(to_check)}")
 
     if not to_check:
-        print(f"[validate] all {total} up to date (skipped {skipped})")
         return
 
-    results = {"ok": 0, "fail": 0, "removed": 0, "skipped_total": skipped,
-               "grades": {"S": 0, "A": 0, "B": 0, "C": 0}}
-
-    # ThreadPoolExecutor — reuse external executor, no thread churn
-    futures = {executor.submit(validate_one, p): p for p in to_check}
+    futures = {executor.submit(validate_one, p, meta): p for p, meta in to_check}
+    checked = 0
     for f in as_completed(futures):
         try:
             status, grade = f.result()
-            if status == "skipped":
-                results["skipped_total"] += 1
-            elif status == "ok" and grade:
+            checked += 1
+            if status == "ok" and grade:
                 results["ok"] += 1
                 results["grades"][grade] = results["grades"].get(grade, 0) + 1
             elif status == "removed":
                 results["removed"] += 1
             elif status == "fail":
                 results["fail"] += 1
-        except Exception as e:
+        except:
             results["fail"] += 1
-            print(f"[validate] worker error: {e}")
 
-    print(f"[validate] checked={len(to_check)} skipped={skipped} "
+    print(f"[validate] checked={checked} skipped={results['skipped_total']} "
           f"ok={results['ok']} fail={results['fail']} "
           f"removed={results['removed']} "
           f"S={results['grades']['S']} A={results['grades']['A']} "
@@ -212,14 +235,12 @@ def main():
             try:
                 now = time.time()
 
-                # 采集新代理
                 if now - last_harvest > HARVEST_INTERVAL:
                     print("[engine] harvesting...")
                     added = harvest_new_proxies()
                     print(f"[engine] harvest done: +{added}")
                     last_harvest = now
 
-                # 验证全部 — 复用 executor
                 t0 = time.time()
                 validate_all(executor)
                 elapsed = time.time() - t0
