@@ -111,18 +111,45 @@ def resolve(ip):
                 prov = province
             else:
                 prov = ""
+            # 过滤 ISP 名混入省份字段
+            _isp_junk = ("阿里", "腾讯", "百度", "华为", "京东", "网易", "字节",
+                         "电信", "联通", "移动", "铁通", "广电", "教育网",
+                         "科技网", "长城", "方正", "歌华", "世纪互联",
+                         "cloud", "alibaba", "tencent", "aws", "azure")
+            if prov and any(j in prov.lower() for j in _isp_junk):
+                prov = ""
 
             # If province is missing (ip2region returns "0"), show "中国"
             if not prov:
                 c = city
+                # 检查 region 字段是否有 HK/TW/MO 信息
+                if region in ("香港特别行政区", "香港"):
+                    return "香港"
+                if region in ("台湾省", "台湾"):
+                    return "台湾"
+                if region in ("澳门特别行政区", "澳门"):
+                    return "澳门"
                 if c == "0":
                     c = ""
                 if not c:
                     return "中国"
+                # 过滤 ISP 名（city 字段混入的）
+                _isp_junk = ("阿里", "腾讯", "百度", "华为", "京东", "网易", "字节",
+                             "电信", "联通", "移动", "铁通", "广电", "教育网",
+                             "科技网", "长城", "方正", "歌华", "世纪互联",
+                             "cloud", "alibaba", "tencent", "aws", "azure")
+                if c and any(j in c.lower() for j in _isp_junk):
+                    c = ""
+                if not c:
+                    return "中国"
                 return c
-            # Normalize 香港/澳门 special regions
+            # Normalize 香港/澳门/台湾 special regions
             if prov in ("香港特别行政区",):
                 prov = "香港"
+                return prov
+            if prov in ("澳门特别行政区", "澳门"):
+                prov = "澳门"
+                return prov
             if prov == "台湾省" or prov == "台湾":
                 prov = "台湾"
                 return prov
@@ -139,7 +166,7 @@ def resolve(ip):
                          "电信", "联通", "移动", "铁通", "广电", "教育网",
                          "科技网", "长城", "方正", "歌华", "世纪互联",
                          "cloud", "alibaba", "tencent", "aws", "azure")
-            if c.lower() in (j.lower() for j in _isp_junk):
+            if c and any(j in c.lower() for j in _isp_junk):
                 c = ""
             if not c or c == "0":
                 return prov
@@ -182,13 +209,17 @@ def resolve_region(ip):
             return "?"
         # ip2region 格式: 国家|区域|省份|城市|ISP
         country = parts[0].strip()
+        region = parts[1].strip()
         province = parts[2].strip()
-        # HK/TW/MO are under CN in ip2region — override
-        if province in ("香港特别行政区", "香港"):
+        # HK/TW/MO — check BOTH province AND region fields
+        hk_tw_mo = province
+        if not hk_tw_mo or hk_tw_mo == "0":
+            hk_tw_mo = region
+        if hk_tw_mo in ("香港特别行政区", "香港"):
             return "HK"
-        if province in ("台湾省", "台湾"):
+        if hk_tw_mo in ("台湾省", "台湾"):
             return "TW"
-        if province in ("澳门特别行政区", "澳门"):
+        if hk_tw_mo in ("澳门特别行政区", "澳门"):
             return "MO"
         # China
         if country == "中国":
