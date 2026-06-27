@@ -12,13 +12,16 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _send(self, code, data, ct="text/html"):
         body = data if isinstance(data, bytes) else data.encode()
-        self.send_response(code)
-        self.send_header("Content-Type", ct)
-        self.send_header("Content-Length", len(body))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ct)
+            self.send_header("Content-Length", len(body))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # client disconnected, not our problem
     def do_GET(self):
         path = self.path.split("?")[0].rstrip("/") or "/"
         if path.startswith("/api/"):
