@@ -134,6 +134,13 @@ def resolve(ip):
             if c.endswith("自治州"):
                 c = c[:-3]
             c = c.rstrip("区县市")
+            # 过滤 ISP 名混入城市字段（阿里/腾讯/百度/华为/电信/联通/移动）
+            _isp_junk = ("阿里", "腾讯", "百度", "华为", "京东", "网易", "字节",
+                         "电信", "联通", "移动", "铁通", "广电", "教育网",
+                         "科技网", "长城", "方正", "歌华", "世纪互联",
+                         "cloud", "alibaba", "tencent", "aws", "azure")
+            if c.lower() in (j.lower() for j in _isp_junk):
+                c = ""
             if not c or c == "0":
                 return prov
             return f"{prov} {c}"
