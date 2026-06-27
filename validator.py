@@ -8,7 +8,7 @@ PFX_PROXY = "proxy:"
 CHECK_INTERVAL = 30          # 每轮验证间隔
 HARVEST_INTERVAL = 300       # 采集间隔 (5分钟)
 VALIDATE_THREADS = 50        # 验证线程数
-VALIDATE_TIMEOUT = 5         # 超时秒数
+VALIDATE_TIMEOUT = 2           # 超时秒数
 CREDIT_MAX = 100
 SUBMIT_CHUNK = 1000          # 分批提交大小，防内存爆炸
 
