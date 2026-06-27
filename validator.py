@@ -15,7 +15,7 @@ SUBMIT_CHUNK = 1000          # 分批提交大小，防内存爆炸
 # C1: 正确使用 ConnectionPool
 POOL = redis.ConnectionPool(
     host=os.environ.get("REDIS_HOST", "proxy-redis"), port=6379, db=1,
-    max_connections=VALIDATE_THREADS + 10,
+    max_connections=VALIDATE_THREADS * 4,
     socket_connect_timeout=5, socket_timeout=5,
     decode_responses=True,
 )
