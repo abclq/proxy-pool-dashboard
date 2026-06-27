@@ -24,25 +24,24 @@ POOL = redis.ConnectionPool(
 REDIS = redis.Redis(connection_pool=POOL)
 
 # ── GeoIP ──
+# 在线 Geo API + Redis 7 天缓存。验证器每次成功/失败都把结果写入 DB，
+# 且请求在线 API 时会通过代理池轮换，避免单出口 IP 限流。
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from searcher import new_with_file_only
-    from util import IPv4
-    SEARCHER = new_with_file_only(IPv4, os.path.join(os.path.dirname(__file__), "data", "ip2region.xdb"))
+    import geo as geo_resolver
 except Exception:
-    SEARCHER = None
+    geo_resolver = None
 
-def geo(ip):
-    if not SEARCHER:
-        return "unknown", "unknown"
+def resolve_geo_and_store(ip, proxy_key, force=False):
+    if not geo_resolver:
+        return "?", "?"
     try:
-        r = SEARCHER.search(ip)
-        if r and "|" in r:
-            parts = r.split("|")
-            return parts[0], parts[-1]
+        data = geo_resolver.resolve_and_store(ip, proxy_key=proxy_key, force=force)
+        if data:
+            return data.get("countryCode", "?") or "?", geo_resolver.resolve(ip)
+        return geo_resolver.resolve_region(ip), geo_resolver.resolve(ip)
     except Exception:
-        pass
-    return "unknown", "unknown"
+        return "?", "?"
 
 # ── 信用分 ──
 # Lua 脚本：原子化 credit_add（zincrby→zrem→delete）
@@ -210,8 +209,8 @@ def validate_one(proxy_str, meta):
 
     if lat is not None:
         grade = grade_for_latency(lat)
-        # 获取 Geo 信息并存储
-        country, city = geo(ip)
+        # 获取 Geo 信息并存储（在线 API + Redis 7 天缓存 + 代理池轮换）
+        country, city = resolve_geo_and_store(ip, proxy_str, force=False)
         REDIS.hset(f"{PFX_PROXY}{proxy_str}", mapping={
             "latency": str(lat), "last_check": now, "success_rate": "100",
             "country": country, "location": city
@@ -219,6 +218,12 @@ def validate_one(proxy_str, meta):
         credit_add(proxy_str, 5)
         return ("ok", grade)
     else:
+        # 失败也把 IP 加入 geo 队列，Dashboard 展示和后续筛选仍能拿到准确地区。
+        if geo_resolver:
+            try:
+                geo_resolver.resolve(ip)
+            except Exception:
+                pass
         REDIS.hset(f"{PFX_PROXY}{proxy_str}", mapping={
             "last_check": now, "success_rate": "0"
         })
