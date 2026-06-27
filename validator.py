@@ -3,6 +3,8 @@
 import redis, time, socket, threading, sys, os, datetime, json, urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import struct
+
 KEY_POOL = "proxies:pool"
 PFX_PROXY = "proxy:"
 CHECK_INTERVAL = 30          # 每轮验证间隔
@@ -56,27 +58,77 @@ def credit_add(proxy, delta):
 def proxy_count():
     return REDIS.zcard(KEY_POOL) or 0
 
-# ── HTTP 探活 ──
+# ── 探活（按协议分发）──
+TARGET_HOST = "www.qq.com"
+TARGET_IP = "103.7.30.123"   # qq.com 固定 IP，避免 DNS 依赖
+
 def http_test(ip, port):
-    """HEAD 请求 qq.com, 返回延迟 ms 或 None"""
-    # C2: context manager 防 socket 泄漏
+    """HTTP 代理检测：发绝对 URI 请求，验证代理转发能力"""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(VALIDATE_TIMEOUT)
             t0 = time.time()
             s.connect((ip, int(port)))
-            s.send(b"HEAD / HTTP/1.1\r\nHost: www.qq.com\r\nConnection: close\r\n\r\n")
+            # 绝对 URI 才走代理转发 — 浏览器配 HTTP 代理时的标准行为
+            s.send(f"GET http://{TARGET_HOST}/ HTTP/1.1\r\nHost: {TARGET_HOST}\r\nConnection: close\r\n\r\n".encode())
             resp = b""
             while True:
                 try:
                     chunk = s.recv(4096)
                     if not chunk: break
                     resp += chunk
-                except: break
+                except Exception: break
             lat = int((time.time() - t0) * 1000)
-            if b"HTTP/" in resp:
+            # 代理返回 HTTP 响应（200/301/302 等）= 转发成功
+            # 若返回 400/502/503 等不含典型标记的也算通了（服务端响应）
+            if resp and (b"HTTP/" in resp or b"html" in resp.lower() or len(resp) > 200):
                 return min(lat, 9999)
-    except:
+    except Exception:
+        pass
+    return None
+
+def socks4_test(ip, port):
+    """SOCKS4 代理检测：CONNECT 到目标 IP:80"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(VALIDATE_TIMEOUT)
+            t0 = time.time()
+            s.connect((ip, int(port)))
+            # SOCKS4 CONNECT 请求: ver=4, cmd=1(CONNECT), port=80, ip=目标, userid=空
+            target_bytes = socket.inet_aton(TARGET_IP)
+            req = b"\x04\x01" + struct.pack(">H", 80) + target_bytes + b"\x00"
+            s.send(req)
+            resp = s.recv(8)
+            lat = int((time.time() - t0) * 1000)
+            # 响应: ver=0, rep=90(请求允许), port, ip
+            if len(resp) >= 2 and resp[1] == 0x5a:  # 0x5a = 90 = granted
+                return min(lat, 9999)
+    except Exception:
+        pass
+    return None
+
+def socks5_test(ip, port):
+    """SOCKS5 代理检测：无认证握手 + CONNECT 到目标"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(VALIDATE_TIMEOUT)
+            t0 = time.time()
+            s.connect((ip, int(port)))
+            # 握手: ver=5, nmethods=1, method=0(无认证)
+            s.send(b"\x05\x01\x00")
+            resp = s.recv(2)
+            if len(resp) < 2 or resp[0] != 5 or resp[1] != 0:
+                return None
+            # CONNECT 请求: ver=5, cmd=1, rsv=0, atyp=1(IPv4), addr, port
+            target_bytes = socket.inet_aton(TARGET_IP)
+            req = b"\x05\x01\x00\x01" + target_bytes + struct.pack(">H", 80)
+            s.send(req)
+            resp = s.recv(10)
+            lat = int((time.time() - t0) * 1000)
+            # 响应: ver=5, rep=0(成功), rsv=0, atyp=1, addr(4), port(2)
+            if len(resp) >= 2 and resp[0] == 5 and resp[1] == 0:
+                return min(lat, 9999)
+    except Exception:
         pass
     return None
 
@@ -120,16 +172,16 @@ def harvest_new_proxies():
 
 # ── 验证核心 ──
 def validate_one(proxy_str, meta):
-    """单代理验证 — meta 由上层传入避免二次 HGETALL"""
+    """单代理验证 — 按协议分发到对应检测函数"""
     if not meta:
         return ("skipped", None)
 
     ip = meta.get("ip", "")
     port_str = meta.get("port", "")
+    proto = meta.get("protocol", "http").lower()
     if not ip:
         ip = proxy_str.split(":")[0]
     if not port_str:
-        # C5: 防御性解析
         parts = proxy_str.split(":")
         port_str = parts[1] if len(parts) > 1 else "0"
 
@@ -138,7 +190,14 @@ def validate_one(proxy_str, meta):
     except (ValueError, TypeError):
         return ("skipped", None)
 
-    lat = http_test(ip, port)
+    # 按协议分发
+    if proto.startswith("socks5"):
+        lat = socks5_test(ip, port)
+    elif proto.startswith("socks4"):
+        lat = socks4_test(ip, port)
+    else:
+        lat = http_test(ip, port)
+
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if lat is not None:

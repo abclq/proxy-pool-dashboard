@@ -38,15 +38,21 @@ class H(BaseHTTPRequestHandler):
             if path == "/":
                 path = "/index.html"
             fp = STATIC + path
-            if not os.path.abspath(fp).startswith(os.path.abspath(STATIC)):
+            # 防路径穿越：realpath 解析 + commonpath 验证
+            real_path = os.path.realpath(fp)
+            real_static = os.path.realpath(STATIC)
+            if os.path.commonpath([real_path, real_static]) != real_static:
                 self._send(403, b"no")
                 return
             if os.path.isfile(fp):
                 ext = os.path.splitext(fp)[1]
-                self._send(200, open(fp, "rb").read(), MIME.get(ext, "application/octet-stream"))
+                with open(fp, "rb") as f:
+                    self._send(200, f.read(), MIME.get(ext, "application/octet-stream"))
             else:
                 # fallback to index.html for SPA routing
-                self._send(200, open(os.path.join(STATIC, "index.html"), "rb").read(), "text/html")
+                idx = os.path.join(STATIC, "index.html")
+                with open(idx, "rb") as f:
+                    self._send(200, f.read(), "text/html")
 
 if __name__ == "__main__":
     os.makedirs(STATIC, exist_ok=True)

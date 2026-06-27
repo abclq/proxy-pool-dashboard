@@ -41,7 +41,7 @@ def geo_lookup(ip):
     return "unknown|unknown|unknown", False
 
 def add_proxy(proxy_str, source, protocol="http"):
-    """添加代理到 Redis，已存在则跳过"""
+    """添加代理到 Redis，原子写入防幽灵残留"""
     if REDIS.zscore(KEY_POOL, proxy_str) is not None:
         return False  # 已存在
 
@@ -56,12 +56,15 @@ def add_proxy(proxy_str, source, protocol="http"):
     region = geo_parts[1] if len(geo_parts) > 1 else "unknown"
     city = geo_parts[2] if len(geo_parts) > 2 else "unknown"
 
-    REDIS.zadd(KEY_POOL, {proxy_str: 20})  # 起始分 20
-    REDIS.hset(f"{PFX_PROXY}{proxy_str}", mapping={
+    # pipeline 事务：zadd + hset 原子执行，防幽灵代理
+    pipe = REDIS.pipeline(transaction=True)
+    pipe.zadd(KEY_POOL, {proxy_str: 20})
+    pipe.hset(f"{PFX_PROXY}{proxy_str}", mapping={
         "ip": ip, "port": port, "protocol": protocol,
         "country": country, "region": region, "city": city,
         "is_china": str(is_cn), "source": source, "latency": "9999"
     })
+    pipe.execute()
     return True
 
 # ── 代理池（用自己池子反爬被墙源） ──
