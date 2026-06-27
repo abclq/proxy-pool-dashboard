@@ -5,6 +5,7 @@ WORKDIR /app
 RUN pip install redis --no-cache-dir
 
 COPY dashboard.py .
+COPY new_fetcher.py .
 COPY ip2region/ ./ip2region/
 COPY data/ ./data/
 COPY static/ ./static/

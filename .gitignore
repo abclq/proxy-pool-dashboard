@@ -1,7 +1,9 @@
 __pycache__/
 *.pyc
 *.bak
-data/
 *.db
 .env
 *.log
+# data/ 目录保留 ip2region.xdb
+data/*
+!data/ip2region.xdb
