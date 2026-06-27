@@ -9,7 +9,7 @@ KEY_POOL = "proxies:pool"
 PFX_PROXY = "proxy:"
 CHECK_INTERVAL = 30          # 每轮验证间隔
 HARVEST_INTERVAL = 300       # 采集间隔 (5分钟)
-VALIDATE_THREADS = 50        # 验证线程数
+VALIDATE_THREADS = 20        # 验证线程数 — 降为20，避免Redis连接池爆满
 VALIDATE_TIMEOUT = 2           # 超时秒数
 CREDIT_MAX = 100
 SUBMIT_CHUNK = 1000          # 分批提交大小，防内存爆炸
@@ -210,8 +210,11 @@ def validate_one(proxy_str, meta):
 
     if lat is not None:
         grade = grade_for_latency(lat)
+        # 获取 Geo 信息并存储
+        country, city = geo(ip)
         REDIS.hset(f"{PFX_PROXY}{proxy_str}", mapping={
-            "latency": str(lat), "last_check": now, "success_rate": "100"
+            "latency": str(lat), "last_check": now, "success_rate": "100",
+            "country": country, "location": city
         })
         credit_add(proxy_str, 5)
         return ("ok", grade)

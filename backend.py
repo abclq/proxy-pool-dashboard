@@ -19,39 +19,38 @@ PER_PAGE = 50
 _cache = {"t": 0, "d": []}
 _cache_lock = threading.Lock()
 
-def load():
-    now = time.time()
-    with _cache_lock:
-        if now - _cache["t"] < 30:
-            return _cache["d"]
-    # DB0: source/anon/https from jhao104 use_proxy hash
+def _load_proxies_nocache():
+    """加载前 10000 个代理，不检查缓存（用于第一次加载或请求）"""
     jhao = {}
     for f, v in r0.hscan_iter("use_proxy"):
         try:
             jhao[f] = json.loads(v)
         except json.JSONDecodeError:
             pass
-    # DB1: delay/latency/last_check from engine ZSET + hashes
-    members = r1.zrange("proxies:pool", 0, -1)
+    members = r1.zrange("proxies:pool", 0, 9999)
     result = []
     pipe = r1.pipeline(transaction=False)
     for i, m in enumerate(members):
         pipe.hgetall(f"proxy:{m}")
         if (i + 1) % 1000 == 0 or i == len(members) - 1:
             for hd in pipe.execute():
-                if not hd or not hd.get("ip"):
+                if not hd:
                     continue
-                ip, port = hd["ip"], hd["port"]
-                key = f"{ip}:{port}"
+                try:
+                    ip, port = m.rsplit(":", 1)
+                except Exception:
+                    continue
+                country = hd.get("country")
+                location = hd.get("location")
+                if not country or location == "":
+                    country = geo.resolve_region(ip)
+                    location = geo.resolve(ip)
+                delay_str = hd.get("latency") or hd.get("delay")
+                delay = float(delay_str) if delay_str and delay_str.replace('.', '', 1).isdigit() else 0
                 proto = hd.get("protocol", "?").lower()
-                delay = float(hd.get("delay", "0") or hd.get("latency", "0") or 0)
-                jd = jhao.get(key, {})
+                jd = jhao.get(f"{ip}:{port}", {})
                 if jd.get("https"):
                     proto = "https"
-                # GeoIP — city detail for China, country for foreign
-                detail = geo.resolve(ip)
-                region_code = geo.resolve_region(ip)
-                # grade
                 if delay < 500: g = "s"
                 elif delay < 1000: g = "a"
                 elif delay < 3000: g = "b"
@@ -59,18 +58,36 @@ def load():
                 result.append({
                     "ip": ip, "port": port, "protocol": proto,
                     "delay": delay, "grade": g,
-                    "region": region_code,
-                    "location": detail,  # 浙江 杭州 / 美国 / ?
+                    "region": country,
+                    "location": location,
                     "source": jd.get("source", "?"),
                     "anon": jd.get("anonymous", "?"),
                     "last_check": hd.get("last_check", "?"),
-                    "is_china": region_code == "CN",
+                    "is_china": country == "CN",
                 })
             pipe = r1.pipeline(transaction=False)
+    return result
+
+def load():
+    """获取代理列表（带缓存，30 秒 TTL）"""
+    now = time.time()
+    with _cache_lock:
+        if now - _cache["t"] < 30:
+            return _cache["d"][:]
+    result = _load_proxies_nocache()
     with _cache_lock:
         _cache["d"] = result
         _cache["t"] = now
     return result
+
+def _preload_cache():
+    """异步预加载缓存（不阻塞 server 启动）"""
+    preload_start = time.time()
+    result = _load_proxies_nocache()
+    with _cache_lock:
+        _cache["d"] = result
+        _cache["t"] = time.time()
+    print(f"缓存预热完成: {len(result)} 条，耗时: {time.time()-preload_start:.2f}s")
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -110,7 +127,6 @@ class H(BaseHTTPRequestHandler):
                 if search and search not in px["ip"]: continue
                 if location_f and location_f.lower() not in px["location"].lower(): continue
                 filtered.append(px)
-            # Sorting
             sort_by = q.get("sort", ["delay"])[0]
             sort_asc = q.get("order", ["asc"])[0] != "desc"
             try:
@@ -172,10 +188,10 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print("API on :5051")
-    # Pre-warm cache
-    t0 = time.time()
-    load()
-    print(f"Cache ready in {time.time()-t0:.1f}s")
-    # Start background geo filler (online API)
+    # 异步预加载缓存（不阻塞 server 启动）
+    preload_start = time.time()
+    threading.Thread(target=_preload_cache, daemon=True).start()
+    # 启动 Geo 填充线程
     geo._init()
+    # 立即启动 server
     ThreadingHTTPServer(("0.0.0.0", 5051), H).serve_forever()
