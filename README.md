@@ -1,64 +1,126 @@
 # Proxy Pool Dashboard v2
 
-高性能代理池管理面板，支持 **69 个采集源**、多线程验证、信用评分、GeoIP 定位。
+[![Docker](https://img.shields.io/badge/Docker-✓-2496ED)](https://docker.com)
+[![Python](https://img.shields.io/badge/Python-3.13-blue)](https://python.org)
+[![Redis](https://img.shields.io/badge/Redis-7-red)](https://redis.io)
 
-## 特性
+基于 [jhao104/proxy_pool](https://github.com/jhao104/proxy_pool) 的自定义 **评分/路由/面板一体化** 增强版。在原有采集+校验基础上，追加信用评分、粘性会话、站点隔离、源质关闸等生产级功能。
 
-- **多源采集** — GitHub 仓库 + API + HTML 表格 + 国内代理站，支持代理轮换反爬
-- **异步验证** — 200 线程并发检测，每轮跳过已验代理，S/A/B/C 信用评级
-- **GeoIP 定位** — 离线 ip2region 数据库，中国 IP 细化到城市
-- **实时代理转发** — 验证引擎可直接使用池内代理爬取被墙源
-- **Web 仪表盘** — 暗色紧凑 UI，地区筛选/排序/分页/导出
+## ✨ 相比原版的新增
 
-## 架构
+| 功能 | 原版 | Dashboard v2 |
+|------|:--:|:--:|
+| 采集源 | 15 | **69**（15 + 35 GitHub + 19 直爬） |
+| 代理评分 | ❌ | ✅ S/A/B/C 四级信用评分 |
+| 粘性会话 | ❌ | ✅ 同目标站点复用同一代理 |
+| 站点隔离 | ❌ | ✅ 按目标站分组代理质量 |
+| 源质关闸 | ❌ | ✅ 低质源自动屏蔽 |
+| 面板筛选 | 简陋 | ✅ 实时过滤/排序/搜索+GeoIP |
+| HTTP/SOCKS5转发 | ❌ | ✅ 内置 :8080 / :1080 代理 |
+
+## 🏗 架构
 
 ```
-19 采集源 (new_fetcher.py) ──┐
-35 GitHub 源 (import_github_proxies.py) ──┤
-15 国内站 (main.py fetchers) ──┤
-                                  ├── Redis ZSET ── backend.py (:5051) ── frontend.py (:5050) ── 浏览器
-验证引擎 (validator.py) ─────────┘                    geo.py (ip2region)
+jhao104/proxy_pool (15源) ──┐
+new_fetcher.py (19源)  ─────┼──→ Redis ──→ backend:5051 ──→ frontend:5050
+import_github_proxies (35源)┘                    │
+                                          ┌──────┴──────┐
+                                          │  validator   │ 后台校验
+                                          └─────────────┘
 ```
 
-## 快速开始
+## 📦 快速开始
 
 ```bash
-# 1. 下载 ip2region 数据库
-mkdir -p data && cd data
-wget https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region.xdb
-
-# 2. 启动
-cd ..
+git clone https://github.com/abclq/proxy-pool-dashboard.git
+cd proxy-pool-dashboard
 docker-compose up -d
 ```
 
-Dashboard: http://localhost:5050
+| 服务 | 地址 |
+|------|------|
+| 🖥 Dashboard | http://localhost:5050 |
+| 📡 API | http://localhost:5051/api/proxies |
+| 🔌 HTTP 代理 | `http://localhost:8080` |
+| 🧦 SOCKS5 代理 | `socks5://localhost:1080` |
 
-## 手动运行（无 Docker）
+## 🔌 API
 
-```bash
-pip install redis
-python3 dashboard.py
+### GET `/api/proxies`
+
+| 参数 | 说明 |
+|------|------|
+| `grade` | `s`/`a`/`b`/`c` |
+| `country` | `CN`中国 / `!CN`海外 |
+| `protocol` | `http`/`https`/`socks4`/`socks5` |
+| `delay` | 延迟上限ms，如 `delay=1000` |
+| `search` | IP模糊搜索 |
+| `sort` / `order` | `delay`/`grade` + `asc`/`desc` |
+| `page` / `limit` | 分页，默认50，最大200 |
+
+```json
+{
+  "total": 8234, "filtered": 156,
+  "proxies": [{
+    "ip": "123.45.67.89", "port": "8080",
+    "protocol": "http", "delay": 234, "grade": "s",
+    "region": "CN", "location": "浙江 杭州",
+    "source": "kuaidaili"
+  }]
+}
 ```
 
-需先启动 Redis（默认连接 `proxy-redis:6379`，可通过 `REDIS_HOST` 环境变量修改）。
+### GET `/api/stats`
 
-## 采集源
+```json
+{"total":8234, "grades":{"s":1200,"a":2800,"b":3200,"c":1034}, "china":3400}
+```
 
-| 类别 | 数量 | 示例 |
-|------|------|------|
-| GitHub 文本 | 39 | MuRongPIG, hproxy, zevtyardt, r00tee, VMHeaven |
-| 国际 API | 8 | ProxyScrape, OpenProxyList, docip, proxifly |
-| 国际 HTML | 4 | Free-Proxy-List, SSLProxies, US-Proxy, Socks-Proxy |
-| 国内站 | 18 | 快代理, ip3366, 89ip, 积流, 齐云, ihuan, goubanjia |
+## 🎯 评分机制
 
-## 环境变量
+| 事件 | 分数 |
+|------|:--:|
+| 新增 | 20 |
+| 校验通过 | +5 |
+| 403 | -20 |
+| 502 | -30 |
+| 超时 | -30 |
+| 上限 | 100 |
+| 归零 | 移入黑名单 |
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `REDIS_HOST` | `proxy-redis` | Redis 主机地址 |
+## 📊 采集源
 
-## 致谢
+### new_fetcher.py (19源)
 
-- [jhao104/proxy_pool](https://github.com/jhao104/proxy_pool) — 代理池基础框架
-- [lionsoul2014/ip2region](https://github.com/lionsoul2014/ip2region) — 离线 IP 定位库
+| 分类 | 源 |
+|------|------|
+| 直爬API | ProxyScrape, docip, 89ip, OpenProxyList |
+| GitHub | MuRongPIG, VMHeaven, jetkai, proxifly-gh, clarketm, Thordata, hookzof |
+| HTML表格 | Free-Proxy-List, SSLProxies, US-Proxy, Socks-Proxy |
+| 国内 | 快代理, ip3366, 积流, 齐云 |
+
+### import_github_proxies.py (35源)
+
+从 TheSpeedX、ShiftyTR、sunny9577、roosterkid、monosans 等 35 个 GitHub 仓库批量导入。
+
+> 完整列表见 [proxy-pool-tools](https://github.com/abclq/proxy-pool-tools)
+
+## 📁 文件
+
+```
+├── dashboard.py        # 启动器
+├── frontend.py         # :5050 Web面板
+├── backend.py          # :5051 API
+├── geo.py              # GeoIP
+├── validator.py        # 校验
+├── new_fetcher.py      # 19源采集
+├── ip2region.xdb       # IP地域库
+├── static/             # 前端
+└── Dockerfile
+```
+
+## 🙏 参考
+
+- [jhao104/proxy_pool](https://github.com/jhao104/proxy_pool) — 原版（23.4k⭐）
+- [ip2region](https://github.com/lionsoul2014/ip2region)
+- [abclq/proxy-pool-tools](https://github.com/abclq/proxy-pool-tools) — 增强工具
