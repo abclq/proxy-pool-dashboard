@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """后台验证+采集引擎 — Redis DB1 代理池维护"""
 import redis, time, socket, threading, sys, os, datetime, json, urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-REDIS = redis.Redis(host=os.environ.get("REDIS_HOST", "proxy-redis"), port=6379, db=1, decode_responses=True,
-                     socket_connect_timeout=5, socket_timeout=5)
 KEY_POOL = "proxies:pool"
 PFX_PROXY = "proxy:"
 CHECK_INTERVAL = 30          # 每轮验证间隔
 HARVEST_INTERVAL = 300       # 采集间隔 (5分钟)
-VALIDATE_THREADS = 200       # 验证线程数
+VALIDATE_THREADS = 50        # 验证线程数 (Redis 连接上限)
 VALIDATE_TIMEOUT = 5         # 超时秒数
 CREDIT_MAX = 100
+
+REDIS = redis.Redis(host=os.environ.get("REDIS_HOST", "proxy-redis"), port=6379, db=1, decode_responses=True,
+                     socket_connect_timeout=5, socket_timeout=5,
+                     max_connections=VALIDATE_THREADS + 10)
 
 # ── GeoIP ──
 try:
@@ -79,32 +82,41 @@ def grade_for_latency(ms):
 
 # ── 采集新代理 ──
 def harvest_new_proxies():
-    """调用 new_fetcher.py 拉取新代理"""
+    """调用 new_fetcher.py 拉取新代理，返回本轮新增数"""
+    before = proxy_count()
     try:
         fetcher_path = os.path.join(os.path.dirname(__file__), "new_fetcher.py")
         if not os.path.exists(fetcher_path):
             print("[harvest] fetcher not found, skip")
             return 0
 
-        # 直接 import 执行
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("new_fetcher", fetcher_path)
-        mod = importlib.util.module_from_spec(spec)
-        # new_fetcher 是脚本式，直接 exec
-        code = open(fetcher_path).read()
-        exec(compile(code, fetcher_path, 'exec'), {"__name__": "__main__"})
-        return proxy_count()
+        # 用子进程隔离执行，避免 exec + 全局变量污染
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, fetcher_path],
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "REDIS_HOST": os.environ.get("REDIS_HOST", "proxy-redis")}
+        )
+        if result.stdout:
+            # 只打最后5行，避免刷屏
+            lines = result.stdout.strip().split("\n")
+            for line in lines[-5:]:
+                print(f"[harvest] {line}")
+        if result.stderr:
+            for line in result.stderr.strip().split("\n")[-3:]:
+                print(f"[harvest:err] {line}")
+        after = proxy_count()
+        return max(0, after - before)
     except Exception as e:
         print(f"[harvest] error: {e}")
         return 0
 
 # ── 验证线程池 ──
-def validate_one(proxy_str, results):
-    """单代理验证"""
+def validate_one(proxy_str):
+    """单代理验证，返回结果 tuple 而非共享写"""
     meta = REDIS.hgetall(f"{PFX_PROXY}{proxy_str}")
     if not meta:
-        results["skipped"] += 1
-        return
+        return ("skipped", None)
 
     ip = meta.get("ip", proxy_str.split(":")[0])
     port = int(meta.get("port", proxy_str.split(":")[1]))
@@ -118,20 +130,16 @@ def validate_one(proxy_str, results):
             "latency": str(lat), "last_check": now, "success_rate": "100"
         })
         credit_add(proxy_str, 5)
-        results["ok"] += 1
-        results["grades"][grade] = results["grades"].get(grade, 0) + 1
+        return ("ok", grade)
     else:
         REDIS.hset(f"{PFX_PROXY}{proxy_str}", mapping={
             "last_check": now, "success_rate": "0"
         })
         removed = credit_add(proxy_str, -15)
-        if removed:
-            results["removed"] += 1
-        else:
-            results["fail"] += 1
+        return ("removed" if removed else "fail", None)
 
-def validate_all():
-    """多线程验证全部代理，跳过最近已验证的"""
+def validate_all(executor):
+    """多线程验证全部代理，跳过最近已验证的 — 复用外部 executor"""
     proxies = REDIS.zrange(KEY_POOL, 0, -1)
     total = len(proxies)
     if total == 0:
@@ -168,25 +176,23 @@ def validate_all():
     results = {"ok": 0, "fail": 0, "removed": 0, "skipped_total": skipped,
                "grades": {"S": 0, "A": 0, "B": 0, "C": 0}}
 
-    queue = to_check[:]
-    lock = threading.Lock()
-
-    def worker():
-        while True:
-            with lock:
-                if not queue: break
-                p = queue.pop()
-            validate_one(p, results)
-
-    threads = []
-    num = min(VALIDATE_THREADS, len(to_check))
-    for _ in range(num):
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-        threads.append(t)
-
-    for t in threads:
-        t.join()
+    # ThreadPoolExecutor — reuse external executor, no thread churn
+    futures = {executor.submit(validate_one, p): p for p in to_check}
+    for f in as_completed(futures):
+        try:
+            status, grade = f.result()
+            if status == "skipped":
+                results["skipped_total"] += 1
+            elif status == "ok" and grade:
+                results["ok"] += 1
+                results["grades"][grade] = results["grades"].get(grade, 0) + 1
+            elif status == "removed":
+                results["removed"] += 1
+            elif status == "fail":
+                results["fail"] += 1
+        except Exception as e:
+            results["fail"] += 1
+            print(f"[validate] worker error: {e}")
 
     print(f"[validate] checked={len(to_check)} skipped={skipped} "
           f"ok={results['ok']} fail={results['fail']} "
@@ -199,31 +205,36 @@ def main():
     print(f"[engine] start — pool={proxy_count()}")
     last_harvest = 0
 
-    while True:
-        try:
-            now = time.time()
+    executor = ThreadPoolExecutor(max_workers=VALIDATE_THREADS, thread_name_prefix="val")
 
-            # 采集新代理
-            if now - last_harvest > HARVEST_INTERVAL:
-                print("[engine] harvesting...")
-                before = proxy_count()
-                harvest_new_proxies()
-                after = proxy_count()
-                print(f"[engine] harvest done: {before} → {after} (+{after-before})")
-                last_harvest = now
+    try:
+        while True:
+            try:
+                now = time.time()
 
-            # 验证全部
-            validate_all()
+                # 采集新代理
+                if now - last_harvest > HARVEST_INTERVAL:
+                    print("[engine] harvesting...")
+                    added = harvest_new_proxies()
+                    print(f"[engine] harvest done: +{added}")
+                    last_harvest = now
 
-            print(f"[engine] sleep {CHECK_INTERVAL}s")
-            time.sleep(CHECK_INTERVAL)
+                # 验证全部 — 复用 executor
+                t0 = time.time()
+                validate_all(executor)
+                elapsed = time.time() - t0
 
-        except KeyboardInterrupt:
-            print("[engine] stopped")
-            break
-        except Exception as e:
-            print(f"[engine] error: {e}")
-            time.sleep(CHECK_INTERVAL)
+                sleep_for = max(0, CHECK_INTERVAL - elapsed)
+                print(f"[engine] round={elapsed:.1f}s sleep={sleep_for:.1f}s")
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+
+            except Exception as e:
+                print(f"[engine] error: {e}")
+                time.sleep(CHECK_INTERVAL)
+
+    finally:
+        executor.shutdown(wait=False)
 
 if __name__ == "__main__":
     main()
