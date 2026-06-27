@@ -289,18 +289,6 @@ def fetch_vmheaven():
             pass
     return count
 
-def fetch_jetkai():
-    count = 0
-    try:
-        text = fetch('https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies.txt')
-        if text:
-            for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
-                if add_proxy(f'{m.group(1)}:{m.group(2)}', 'jetkai'):
-                    count += 1
-    except Exception:
-        pass
-    return count
-
 def fetch_proxifly_gh():
     count = 0
     try:
@@ -404,6 +392,99 @@ def fetch_databay():
             pass
     return count
 
+# ── 新源 ErcinDedeoglu/proxies (373⭐, 40k proxies, daily) ──
+def fetch_ercindededeoglu():
+    count = 0
+    for proto, fname in [
+        ('http', 'http.txt'),
+        ('http', 'https.txt'),
+        ('socks4', 'socks4.txt'),
+        ('socks5', 'socks5.txt'),
+    ]:
+        try:
+            url = f'https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/{fname}'
+            text = fetch(url)
+            if text:
+                for line in text.strip().split('\n'):
+                    line = line.strip().replace('\r', '')
+                    m = re.match(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)', line)
+                    if m:
+                        if add_proxy(m.group(1), 'ercindededeoglu', protocol=proto):
+                            count += 1
+        except Exception:
+            pass
+    return count
+
+# ── 新源 ProxyScraper/ProxyScraper (207⭐, 8k proxies, every 8h) ──
+def fetch_proxyscraper_repo():
+    count = 0
+    for proto, fname in [
+        ('http', 'http.txt'),
+        ('socks4', 'socks4.txt'),
+        ('socks5', 'socks5.txt'),
+    ]:
+        try:
+            url = f'https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/{fname}'
+            text = fetch(url)
+            if text:
+                for line in text.strip().split('\n'):
+                    line = line.strip().replace('\r', '')
+                    m = re.match(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)', line)
+                    if m:
+                        if add_proxy(m.group(1), 'proxyscraper-repo', protocol=proto):
+                            count += 1
+        except Exception:
+            pass
+    return count
+
+# ── 新源 Anonym0usWork1221/Free-Proxies (201⭐, 8.5k proxies, every 2h) ──
+def fetch_anon1221():
+    count = 0
+    for proto, fname in [
+        ('http', 'proxy_files/http_proxies.txt'),
+        ('socks4', 'proxy_files/socks4_proxies.txt'),
+        ('socks5', 'proxy_files/socks5_proxies.txt'),
+    ]:
+        try:
+            url = f'https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/{fname}'
+            text = fetch(url)
+            if text:
+                for line in text.strip().split('\n'):
+                    line = line.strip().replace('\r', '')
+                    m = re.match(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)', line)
+                    if m:
+                        if add_proxy(m.group(1), 'anon1221', protocol=proto):
+                            count += 1
+        except Exception:
+            pass
+    return count
+
+# ── 新源 hideip.me (474⭐, 1k proxies, every 10min) ──
+def fetch_hideip():
+    count = 0
+    for proto, fname in [
+        ('http', 'http.txt'),
+        ('socks4', 'socks4.txt'),
+        ('socks5', 'socks5.txt'),
+    ]:
+        try:
+            url = f'https://raw.githubusercontent.com/zloi-user/hideip.me/master/{fname}'
+            text = fetch(url)
+            if text:
+                for line in text.strip().split('\n'):
+                    line = line.strip().replace('\r', '')
+                    # hideip format: IP:port:Country — strip trailing :Country
+                    clean = line.rsplit(':') 
+                    if len(clean) >= 2:
+                        line = f'{clean[0]}:{clean[1]}'
+                    m = re.match(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)', line)
+                    if m:
+                        if add_proxy(m.group(1), 'hideip', protocol=proto):
+                            count += 1
+        except Exception:
+            pass
+    return count
+
 # MAIN
 # ═══════════════════════════════════════════════
 if __name__ == "__main__":
@@ -419,9 +500,6 @@ if __name__ == "__main__":
     total += fetch_text_list("clarketm",
         "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
         "clarketm")
-    total += fetch_text_list("Thordata",
-        "https://raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/all.txt",
-        "thordata")
     total += fetch_text_list("hookzof/socks5",
         "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
         "hookzof")
@@ -440,13 +518,16 @@ if __name__ == "__main__":
     total += fetch_openproxylist()
     total += fetch_murongpig()
     total += fetch_vmheaven()
-    total += fetch_jetkai()
     total += fetch_proxifly_gh()
     total += fetch_jiliu()
     total += fetch_qiyun()
     total += fetch_vpslabcloud()
     total += fetch_iplocate()
     total += fetch_databay()
+    total += fetch_ercindededeoglu()
+    total += fetch_proxyscraper_repo()
+    total += fetch_anon1221()
+    total += fetch_hideip()
 
     elapsed = time.time() - start_time
     pool_size = REDIS.zcard(KEY_POOL)
