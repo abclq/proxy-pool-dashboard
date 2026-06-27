@@ -40,7 +40,22 @@ COUNTRY_CODE = {
     "BG": "保加利亚", "HU": "匈牙利", "EG": "埃及", "SA": "沙特", "CO": "哥伦比亚",
     "PK": "巴基斯坦", "BD": "孟加拉国", "KZ": "哈萨克斯坦", "PE": "秘鲁",
     "ZA": "南非", "CL": "智利", "NG": "尼日利亚", "KE": "肯尼亚", "MA": "摩洛哥",
-    "DZ": "阿尔及利亚",
+    "DZ": "阿尔及利亚", "AO": "安哥拉", "ZM": "赞比亚", "ZW": "津巴布韦",
+    "ET": "埃塞俄比亚", "GH": "加纳", "TZ": "坦桑尼亚", "UG": "乌干达",
+    "CI": "科特迪瓦", "SN": "塞内加尔", "CM": "喀麦隆", "SD": "苏丹",
+    "TN": "突尼斯", "VE": "委内瑞拉", "EC": "厄瓜多尔", "BO": "玻利维亚",
+    "PY": "巴拉圭", "UY": "乌拉圭", "CR": "哥斯达黎加", "PA": "巴拿马",
+    "DO": "多米尼加", "GT": "危地马拉", "HN": "洪都拉斯", "NI": "尼加拉瓜",
+    "SV": "萨尔瓦多", "IR": "伊朗", "IQ": "伊拉克", "SY": "叙利亚",
+    "JO": "约旦", "LB": "黎巴嫩", "KW": "科威特", "QA": "卡塔尔",
+    "BH": "巴林", "OM": "阿曼", "YE": "也门", "LK": "斯里兰卡",
+    "NP": "尼泊尔", "MM": "缅甸", "KH": "柬埔寨", "LA": "老挝",
+    "MN": "蒙古", "AF": "阿富汗", "UZ": "乌兹别克斯坦",
+    "AZ": "阿塞拜疆", "LV": "拉脱维亚", "LT": "立陶宛", "EE": "爱沙尼亚",
+    "SK": "斯洛伐克", "SI": "斯洛文尼亚", "HR": "克罗地亚", "RS": "塞尔维亚",
+    "IS": "冰岛", "CY": "塞浦路斯", "MT": "马耳他", "LU": "卢森堡",
+    "MD": "摩尔多瓦", "GE": "格鲁吉亚", "AM": "亚美尼亚",
+    "FJ": "斐济", "PG": "巴布亚新几内亚",
 }
 # Reverse map: English country name → CN code
 _EN_TO_CODE = {
@@ -131,7 +146,14 @@ def resolve(ip):
                 return "台湾"
             if province in ("澳门特别行政区", "澳门"):
                 return "澳门"
-            # Try country name mapping
+            # Foreign — ip2region v4 自带 ISO 码在 parts[4]
+            iso = parts[4].strip().upper() if len(parts) > 4 else ""
+            if iso and len(iso) == 2:
+                cn_name = COUNTRY_CODE.get(iso)
+                if cn_name:
+                    return cn_name
+                return iso
+            # 兜底：英文名反查
             code = _EN_TO_CODE.get(country.lower())
             if code:
                 return COUNTRY_CODE.get(code, country)
@@ -164,7 +186,11 @@ def resolve_region(ip):
         # China
         if country == "中国":
             return "CN"
-        # Foreign — try English name → code
+        # Foreign — ip2region v4 自带 ISO 码在 parts[4]
+        iso = parts[4].strip().upper() if len(parts) > 4 else ""
+        if iso and len(iso) == 2 and iso.isalpha():
+            return iso
+        # 兜底：英文名反查
         code = _EN_TO_CODE.get(country.lower())
         return code if code else "?"
     except Exception:
