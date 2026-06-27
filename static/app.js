@@ -1,374 +1,209 @@
-/* ── 全局状态 ── */
-const PER_PAGE = 50;
-let allProxies = [];
-let currentPage = 1;
-let currentTab = 'all';
-let filters = { region: '', protocol: '', speed: '', search: '' };
-let regionSet = new Set();
-let checkingTimer = null;
+// Proxy Pool Dashboard — v11
+const STATE = {page:1, pages:1, perPage:50, sort:'delay', asc:true, filters:{grade:'',country:'',protocol:'',delay:'',search:''}};
+let statsCache = null, abortCtrl = null;
+const MAX_PAGE = 7;
 
-/* ── 统计 DOM ── */
-const $ = id => document.getElementById(id);
-const sTotal = $('s-total'), sVerified = $('s-verified'), sS = $('s-S'), sA = $('s-A'), sB = $('s-B'), sC = $('s-C');
-const sText = $('status-text'), sSub = $('status-sub');
-const progress = $('progress-section'), progressFill = $('progress-fill'), progressText = $('progress-text');
-const proxyList = $('proxy-list'), filterCount = $('filtered-count'), avgLat = $('avg-latency');
-const loading = $('loading'), noResults = $('no-results');
-const curPage = $('current-page'), totalPages = $('total-pages');
-const prevBtn = $('prev-page'), nextBtn = $('next-page');
-const toast = $('toast');
+const COUNTRY_NAME = {
+  CN:"中国",HK:"香港",TW:"台湾",MO:"澳门",US:"美国",JP:"日本",KR:"韩国",SG:"新加坡",
+  DE:"德国",GB:"英国",FR:"法国",IT:"意大利",ES:"西班牙",NL:"荷兰",SE:"瑞典",CH:"瑞士",
+  CA:"加拿大",AU:"澳大利亚",NZ:"新西兰",VN:"越南",TH:"泰国",MY:"马来西亚",ID:"印度尼西亚",PH:"菲律宾",
+  IN:"印度",PK:"巴基斯坦",BD:"孟加拉国",RU:"俄罗斯",UA:"乌克兰",PL:"波兰",CZ:"捷克",
+  BR:"巴西",AR:"阿根廷",MX:"墨西哥",CL:"智利",ZA:"南非",EG:"埃及",NG:"尼日利亚",KE:"肯尼亚",
+  SA:"沙特阿拉伯",AE:"阿联酋",TR:"土耳其",IL:"以色列",FI:"芬兰",NO:"挪威",DK:"丹麦",IE:"爱尔兰",AT:"奥地利",BE:"比利时",
+  CO:"哥伦比亚",IR:"伊朗",KH:"柬埔寨",EC:"厄瓜多尔",RO:"罗马尼亚",KZ:"哈萨克斯坦",PE:"秘鲁",
+};
 
-/* ── 格式化 ── */
-function fmtLat(ms) {
-  if (ms == null || ms === undefined) return '<span class="lat-unknown">--</span>';
-  if (ms < 200) return '<span class="lat-s">' + ms + 'ms</span>';
-  if (ms < 500) return '<span class="lat-ok">' + ms + 'ms</span>';
-  if (ms < 1000) return '<span class="lat-warn">' + ms + 'ms</span>';
-  return '<span class="lat-bad">' + ms + 'ms</span>';
-}
-function badgeGrade(g) {
-  if (g === 'S') return '<span class="badge badge-s">S 级</span>';
-  if (g === 'A') return '<span class="badge badge-a">A 级</span>';
-  if (g === 'B') return '<span class="badge badge-b">B 级</span>';
-  return '<span class="badge badge-c">C 级</span>';
+function esc(s){if(s==null)return'';const d=document.createElement('div');d.appendChild(document.createTextNode(String(s)));return d.innerHTML;}
+function escAttr(s){if(s==null)return'';return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+async function api(path,signal){const r=await fetch(path,{signal});if(!r.ok)throw new Error(r.status);return r.json();}
+
+async function loadStats(){
+  try{statsCache=await api('/api/stats');renderStats();buildCountryDropdown();}catch(e){console.error('stats',e);}
 }
 
-/* ── 数据加载 ── */
-async function loadProxies() {
-  try {
-    const res = await fetch('/api/proxies');
-    allProxies = await res.json();
-    updateRegionFilter();
-    render();
-  } catch (e) { console.error(e); }
+function renderStats(){
+  if(!statsCache)return;
+  const{total,grades,china}=statsCache;
+  document.getElementById('v-total').textContent=total.toLocaleString();
+  document.getElementById('v-s').textContent=(grades.s||0).toLocaleString();
+  document.getElementById('v-a').textContent=(grades.a||0).toLocaleString();
+  document.getElementById('v-b').textContent=(grades.b||0).toLocaleString();
+  document.getElementById('v-c').textContent=(grades.c||0).toLocaleString();
+  document.getElementById('v-cn').textContent=(china||0).toLocaleString();
 }
 
-async function loadStats() {
-  try {
-    const res = await fetch('/api/stats');
-    const s = await res.json();
-    sTotal.textContent = s.total;
-    sVerified.textContent = s.verified || 0;
-    sS.textContent = s.S || 0;
-    sA.textContent = s.A || 0;
-    sB.textContent = s.B || 0;
-    sC.textContent = s.C || 0;
-    avgLat.textContent = s.avg_latency || '--';
-    if (s.checking) {
-      sText.textContent = '检测中';
-      sSub.textContent = s.check_progress.current + '/' + s.check_progress.total;
-      progress.classList.remove('hidden');
-      const pct = s.check_progress.total > 0 ? (s.check_progress.current/s.check_progress.total*100) : 0;
-      progressFill.style.width = pct + '%';
-      progressText.textContent = s.check_progress.current + '/' + s.check_progress.total;
-    } else {
-      sText.textContent = '就绪';
-      sSub.textContent = s.last_check ? new Date(s.last_check*1000).toLocaleTimeString('zh-CN') : '-';
-      progress.classList.add('hidden');
+function buildCountryDropdown(){
+  const sel=document.querySelector('[name=country]');
+  if(!sel||!statsCache||!statsCache.regions)return;
+  const prev=sel.value;
+  while(sel.options.length>2)sel.remove(2);
+  const regions=Object.entries(statsCache.regions).sort((a,b)=>b[1]-a[1]);
+  for(const[code,_n]of regions){
+    // CN gets its own option alongside !CN
+    const name=COUNTRY_NAME[code]||code;
+    const opt=document.createElement('option');
+    opt.value=code;
+    opt.textContent=`${name} (${code})`;
+    sel.appendChild(opt);
+  }
+  if(prev&&[...sel.options].some(o=>o.value===prev))sel.value=prev;
+}
+
+function readFilters(){
+  STATE.filters.grade=document.querySelector('[name=grade]')?.value||'';
+  STATE.filters.country=document.querySelector('[name=country]')?.value||'';
+  STATE.filters.protocol=document.querySelector('[name=protocol]')?.value||'';
+  STATE.filters.delay=document.querySelector('[name=delay]')?.value||'';
+  STATE.filters.search=(document.querySelector('[name=search]')?.value||'').trim().toLowerCase();
+}
+
+function buildURL(){
+  const p=new URLSearchParams();
+  if(STATE.filters.grade)p.set('grade',STATE.filters.grade);
+  if(STATE.filters.country)p.set('country',STATE.filters.country);
+  if(STATE.filters.protocol)p.set('protocol',STATE.filters.protocol);
+  if(STATE.filters.delay)p.set('delay',STATE.filters.delay);
+  if(STATE.filters.search)p.set('search',STATE.filters.search);
+  p.set('sort',STATE.sort);
+  p.set('asc',STATE.asc?'1':'0');
+  p.set('page',STATE.page);
+  p.set('limit',STATE.perPage);
+  return '/api/proxies?'+p.toString();
+}
+
+async function loadData(){
+  if(abortCtrl)abortCtrl.abort();
+  abortCtrl=new AbortController();
+  const tbody=document.querySelector('tbody');
+  tbody.classList.add('loading');
+  try{
+    const data=await api(buildURL(),abortCtrl.signal);
+    STATE.pages=data.pages||1;
+    STATE.page=data.page||1;
+    renderTable(data.proxies||[]);
+    renderPagination();
+  }catch(e){
+    if(e.name!=='AbortError'){
+      console.error('load',e);
+      document.querySelector('tbody').innerHTML='<tr><td colspan="10">加载失败</td></tr>';
     }
-  } catch (e) { console.error(e); }
-}
-
-/* ── 地区筛选器 ── */
-function updateRegionFilter() {
-  regionSet.clear();
-  for (const p of allProxies) {
-    if (p.is_china && p.region_label) regionSet.add('🇨🇳 ' + p.region_label);
-    else if (!p.is_china && p.country) regionSet.add(p.country);
-  }
-  const sel = $('region-filter');
-  const current = sel.value;
-  sel.innerHTML = '<option value="">所有地区</option>';
-  [...regionSet].sort().forEach(r => {
-    sel.innerHTML += '<option value="' + r + '">' + r + '</option>';
-  });
-  sel.value = current;
-}
-
-/* ── 筛选 ── */
-function applyFilters() {
-  filters.region = $('region-filter').value.replace(/^🇨🇳 /, '');
-  filters.protocol = $('protocol-filter').value;
-  filters.speed = $('speed-filter').value;
-  filters.search = $('search-input').value.toLowerCase().trim();
-  currentPage = 1;
-  render();
-}
-document.querySelectorAll('.filter-item select, .filter-item input').forEach(el => {
-  el.addEventListener('change', applyFilters);
-  if (el.tagName === 'INPUT') el.addEventListener('input', applyFilters);
-});
-
-function getFiltered() {
-  let list = allProxies;
-  if (currentTab === 'china') list = list.filter(p => p.is_china);
-  else if (currentTab === 'foreign') list = list.filter(p => !p.is_china);
-  else if (currentTab === 's') list = list.filter(p => p.speed === 'S');
-  else if (currentTab === 'regions') return [];
-  else if (currentTab === 'nodes') return [];
-  if (filters.protocol) list = list.filter(p => p.protocol === filters.protocol);
-  if (filters.speed) list = list.filter(p => p.speed === filters.speed);
-  if (filters.region) {
-    list = list.filter(p => (p.is_china && p.region_label === filters.region) || (!p.is_china && p.country === filters.region));
-  }
-  if (filters.search) list = list.filter(p => p.ip.includes(filters.search));
-  return list;
-}
-
-/* ── 渲染 ── */
-function render() {
-  if (currentTab === 'regions') { renderRegions(); return; }
-  if (currentTab === 'nodes') { renderNodes(); return; }
-  const filtered = getFiltered();
-  const total = filtered.length;
-  const pages = Math.max(1, Math.ceil(total / PER_PAGE));
-  if (currentPage > pages) currentPage = pages;
-  const start = (currentPage - 1) * PER_PAGE;
-  const pageData = filtered.slice(start, start + PER_PAGE);
-  filterCount.textContent = total;
-  curPage.textContent = currentPage;
-  totalPages.textContent = pages;
-  prevBtn.disabled = currentPage <= 1;
-  nextBtn.disabled = currentPage >= pages;
-  const validLats = pageData.filter(p => p.latency != null).map(p => p.latency);
-  avgLat.textContent = validLats.length ? (validLats.reduce((a,b)=>a+b,0)/validLats.length).toFixed(1) : '--';
-  proxyList.innerHTML = pageData.map(p =>
-    '<tr><td><code>' + p.ip + '</code></td><td>' + p.port + '</td><td>' +
-    (p.protocol === 'https' ? '🔒 HTTPS' : 'HTTP') + '</td><td>' +
-    (p.is_china ? '<span class="badge-cn">🇨🇳 ' + p.region_label + '</span>' : '<span class="badge-intl">' + p.country + '</span>') +
-    '</td><td>' + badgeGrade(p.speed) + '</td><td>' + fmtLat(p.latency) + '</td><td><span style="color:var(--text2)">' +
-    (p.source||'未知') + '</span></td><td><button class="btn-copy" onclick="copier(' + JSON.stringify(p.proxy) +
-    ')" title="复制">📋</button></td></tr>'
-  ).join('');
-  if (total === 0) {
-    proxyList.innerHTML = '';
-    noResults.classList.remove('hidden');
-    loading.classList.add('hidden');
-  } else {
-    noResults.classList.add('hidden');
-    loading.classList.add('hidden');
+  }finally{
+    tbody.classList.remove('loading');
   }
 }
 
-/* ── 地区分布页 ── */
-function renderRegions() {
-  noResults.classList.add('hidden'); loading.classList.add('hidden');
-  const chinaStats = {}, foreignStats = {};
-  for (const p of allProxies) {
-    if (p.is_china) {
-      const city = p.region_label || '未知';
-      if (!chinaStats[city]) chinaStats[city] = { count: 0, S: 0, A: 0, B: 0, C: 0, lats: [] };
-      chinaStats[city].count++;
-      chinaStats[city][p.speed || 'C']++;
-      if (p.latency != null) chinaStats[city].lats.push(p.latency);
-    } else {
-      const c = p.country || '未知';
-      if (!foreignStats[c]) foreignStats[c] = { count: 0, S: 0, A: 0, B: 0, C: 0, lats: [] };
-      foreignStats[c].count++;
-      foreignStats[c][p.speed || 'C']++;
-      if (p.latency != null) foreignStats[c].lats.push(p.latency);
-    }
+function renderTable(proxies){
+  const tbody=document.querySelector('tbody');
+  if(!proxies.length){tbody.innerHTML='<tr><td colspan="10">无数据</td></tr>';return;}
+  const gradeLabel={s:'S',a:'A',b:'B',c:'C'};
+  let html='';
+  for(const p of proxies){
+    html+='<tr>'+
+      `<td>${esc(p.ip)} <button class="copy-btn" data-copy="${escAttr(p.ip+':'+p.port)}" title="复制">📋</button></td>`+
+      `<td>${esc(String(p.port))}</td>`+
+      `<td>${esc(p.protocol||'?')}</td>`+
+      `<td><span class="badge ${escAttr(p.grade||'c')}">${gradeLabel[p.grade]||'?'}</span></td>`+
+      `<td>${esc((p.delay||0).toFixed(0))}ms</td>`+
+      `<td>${esc(p.location||'?')}</td>`+
+      `<td>${esc(p.region||'?')}</td>`+
+      `<td>${esc(p.source||'?')}</td>`+
+      `<td>${esc(p.anon||'?')}</td>`+
+      `<td>${esc(String(p.last_check||'?').slice(0,10))}</td>`+
+      '</tr>';
   }
-  filterCount.textContent = allProxies.length;
-  avgLat.textContent = '--';
-  const cnSorted = Object.entries(chinaStats).sort((a,b) => b[1].count - a[1].count);
-  const intlSorted = Object.entries(foreignStats).sort((a,b) => b[1].count - a[1].count);
-  let html = '';
-  if (cnSorted.length) {
-    html += '<tr class="section-hdr"><td colspan="8" style="color:var(--china);font-weight:700;padding:12px 0 6px;">🇨🇳 中国代理 · 按城市</td></tr>';
-    for (const [city, s] of cnSorted) {
-      const avg = s.lats.length ? (s.lats.reduce((a,b)=>a+b,0)/s.lats.length).toFixed(0) : '--';
-      html += '<tr><td colspan="3"><strong>' + city + '</strong></td><td>代理 ' + s.count + '</td>' +
-        '<td>' + badgeGradeN('S',s.S) + '</td><td>' + badgeGradeN('A',s.A) + '</td>' +
-        '<td>' + badgeGradeN('B',s.B) + '</td><td>' + badgeGradeN('C',s.C) + '</td><td style="color:var(--text2)">均' + avg + 'ms</td></tr>';
-    }
-  }
-  if (intlSorted.length) {
-    html += '<tr class="section-hdr"><td colspan="8" style="color:var(--accent);font-weight:700;padding:12px 0 6px;">🌍 国外代理 · 按国家</td></tr>';
-    for (const [c, s] of intlSorted) {
-      const avg = s.lats.length ? (s.lats.reduce((a,b)=>a+b,0)/s.lats.length).toFixed(0) : '--';
-      html += '<tr><td colspan="3"><strong>' + c + '</strong></td><td>代理 ' + s.count + '</td>' +
-        '<td>' + badgeGradeN('S',s.S) + '</td><td>' + badgeGradeN('A',s.A) + '</td>' +
-        '<td>' + badgeGradeN('B',s.B) + '</td><td>' + badgeGradeN('C',s.C) + '</td><td style="color:var(--text2)">均' + avg + 'ms</td></tr>';
-    }
-  }
-  proxyList.innerHTML = html;
+  tbody.innerHTML=html;
 }
 
-function badgeGradeN(grade, count) {
-  if (count === 0) return '';
-  const map = { S: ['badge-s','S'], A: ['badge-a','A'], B: ['badge-b','B'], C: ['badge-c','C'] };
-  const m = map[grade] || ['badge-c','C'];
-  return '<span class="badge ' + m[0] + '">' + m[1] + ' ' + count + '</span>';
+function renderPagination(){
+  const nav=document.getElementById('pagination');
+  if(!nav)return;
+  const{page,pages}=STATE;
+  if(pages<=1){nav.innerHTML='';return;}
+  let html='';
+  let start=Math.max(1,page-Math.floor(MAX_PAGE/2));
+  let end=Math.min(pages,start+MAX_PAGE-1);
+  if(end-start+1<MAX_PAGE)start=Math.max(1,end-MAX_PAGE+1);
+  if(page>1)html+=`<a href="#" data-page="1">«</a><a href="#" data-page="${page-1}">‹</a>`;
+  for(let i=start;i<=end;i++){
+    if(i===page)html+=`<span class="cur">${i}</span>`;
+    else html+=`<a href="#" data-page="${i}">${i}</a>`;
+  }
+  if(page<pages)html+=`<a href="#" data-page="${page+1}">›</a><a href="#" data-page="${pages}">»</a>`;
+  nav.innerHTML=html;
 }
 
-/* ── 分页 ── */
-prevBtn.addEventListener('click', () => { if (currentPage > 1) { currentPage--; render(); } });
-nextBtn.addEventListener('click', () => {
-  const filtered = getFiltered();
-  const pages = Math.ceil(filtered.length / PER_PAGE);
-  if (currentPage < pages) { currentPage++; render(); }
-});
+// ─── Event handlers ──────────────────────────────────────────────────
 
-/* ── 导航 ── */
-document.querySelectorAll('.nav-item[data-tab]').forEach(el => {
-  el.addEventListener('click', e => {
-    e.preventDefault();
-    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-    el.classList.add('active');
-    currentTab = el.dataset.tab;
-    currentPage = 1;
-    if (currentTab === 'regions' || currentTab === 'nodes') {
-      $('region-filter').value = '';
-      $('protocol-filter').value = '';
-      $('speed-filter').value = '';
-      $('search-input').value = '';
-      filters = { region: '', protocol: '', speed: '', search: '' };
-    }
-    render();
-  });
-});
+function onFilterChange(){
+  readFilters();
+  STATE.page=1;
+  loadData();
+}
 
-/* ── 复制 ── */
-function copier(text) {
-  navigator.clipboard.writeText(text).then(() => {
-    toast.classList.remove('hidden');
-    setTimeout(() => toast.classList.add('hidden'), 1500);
+function onSort(col){
+  if(STATE.sort===col)STATE.asc=!STATE.asc;
+  else{STATE.sort=col;STATE.asc=true;}
+  loadData();
+}
+
+function onPageClick(ev){
+  const el=ev.target.closest('a[data-page],button[data-page]');
+  if(!el)return;
+  ev.preventDefault();
+  STATE.page=parseInt(el.dataset.page);
+  loadData();
+}
+
+function onCopy(ev){
+  const btn=ev.target.closest('.copy-btn');
+  if(!btn)return;
+  const text=btn.dataset.copy;
+  navigator.clipboard.writeText(text).then(()=>{
+    const toast=document.getElementById('toast')||(()=>{const t=document.createElement('div');t.id='toast';document.body.appendChild(t);return t;})();
+    toast.textContent='已复制 '+text;
+    toast.classList.add('show');
+    setTimeout(()=>toast.classList.remove('show'),1500);
+  }).catch(()=>{
+    // fallback
+    const ta=document.createElement('textarea');
+    ta.value=text;ta.style.position='fixed';ta.style.opacity='0';
+    document.body.appendChild(ta);ta.select();
+    document.execCommand('copy');document.body.removeChild(ta);
   });
 }
 
-/* ── 导出 ── */
-function doExport(qs) {
-  const a = document.createElement('a');
-  a.href = '/api/export?' + qs;
-  a.download = 'proxies.txt';
-  a.click();
-}
-$('exp-all').addEventListener('click', () => doExport(''));
-$('exp-http').addEventListener('click', () => doExport('protocol=http'));
-$('exp-https').addEventListener('click', () => doExport('protocol=https'));
-$('exp-s').addEventListener('click', () => doExport('speed=S'));
-$('exp-china').addEventListener('click', () => doExport('china=1'));
-
-$('refresh-btn').addEventListener('click', () => {
-  fetch('/api/check', { method: 'POST' }).catch(() => {});
-  setTimeout(() => { loadProxies(); loadStats(); }, 1000);
-});
-
-/* ── 代理服务控制 ── */
-function toggleService(service) {
-  const btn = $('btn-' + service);
-  const isRunning = btn.classList.contains('running');
-  const action = isRunning ? 'stop' : 'start';
-  btn.disabled = true;
-  fetch('/api/services', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: action, service: service }),
-  }).then(r => r.json()).then(s => updateServiceUI(s)).finally(() => { btn.disabled = false; });
-}
-document.querySelectorAll('.btn-service').forEach(btn => {
-  btn.addEventListener('click', () => { toggleService(btn.dataset.service); });
-});
-
-async function updateServiceUI(s) {
-  const btnHttp = $('btn-http'), statusHttp = $('status-http');
-  if (s.http.running) { btnHttp.classList.add('running'); btnHttp.textContent = '停止'; statusHttp.textContent = '✅ :' + s.http.port; }
-  else { btnHttp.classList.remove('running'); btnHttp.textContent = '启动'; statusHttp.textContent = ':' + s.http.port; }
-  const btnS5 = $('btn-socks5'), statusS5 = $('status-socks5');
-  if (s.socks5.running) { btnS5.classList.add('running'); btnS5.textContent = '停止'; statusS5.textContent = '✅ :' + s.socks5.port; }
-  else { btnS5.classList.remove('running'); btnS5.textContent = '启动'; statusS5.textContent = ':' + s.socks5.port; }
+function onKeydown(ev){
+  const tag=ev.target.tagName;
+  if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT')return;
+  if(ev.key==='ArrowLeft'){if(STATE.page>1){STATE.page--;loadData();}}
+  if(ev.key==='ArrowRight'){if(STATE.page<STATE.pages){STATE.page++;loadData();}}
 }
 
-/* ── 节点选择 ── */
-const nodePicker = $('node-picker');
-const selectedNode = $('selected-node');
-const btnClearNode = $('btn-clear-node');
+// ─── Init ────────────────────────────────────────────────────────────
 
-async function loadNodeSelector() {
-  try {
-    const r = await fetch('/api/select');
-    const s = await r.json();
-    if (s.selected && s.info) {
-      selectedNode.className = 'selected-node';
-      let g = (s.info.speed || 'C').toLowerCase();
-      selectedNode.innerHTML = '🎯 ' + s.info.ip + ':' + s.info.port + ' <span class="badge badge-' + g + '">' + (s.info.speed||'C') + '级 ' + (s.info.latency||'?') + 'ms</span>';
-      btnClearNode.disabled = false;
-    } else {
-      selectedNode.className = 'selected-node none';
-      selectedNode.textContent = '🔄 自动轮换';
-      btnClearNode.disabled = true;
-    }
-    nodePicker.innerHTML = '<option value="">-- 选择节点 --</option>';
-    for (const p of (s.available || [])) {
-      var label = (p.speed||'C') + ' ' + (p.latency||'?') + 'ms | ' + (p.region||p.country||'未知') + ' | ' + p.proxy;
-      var sel = s.selected === p.proxy ? ' selected' : '';
-      nodePicker.innerHTML += '<option value="' + p.proxy + '"' + sel + '>' + label + '</option>';
-    }
-  } catch(e) { console.error(e); }
-}
-nodePicker.addEventListener('change', async () => {
-  var proxy = nodePicker.value;
-  if (!proxy) return;
-  await fetch('/api/select', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'set', proxy:proxy}) });
-  loadNodeSelector();
-});
-btnClearNode.addEventListener('click', async () => {
-  await fetch('/api/select', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'clear'}) });
-  nodePicker.value = '';
-  loadNodeSelector();
-});
-
-/* ── 路由策略 ── */
-const strategyPicker = $('strategy-picker');
-if (strategyPicker) {
-  strategyPicker.addEventListener('change', async () => {
-    await fetch('/api/strategy', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({strategy: strategyPicker.value}) });
+window.addEventListener('DOMContentLoaded',()=>{
+  // Filter change events
+  document.querySelectorAll('[name=grade],[name=country],[name=protocol]').forEach(el=>el.addEventListener('change',onFilterChange));
+  let delayTimer;
+  document.querySelector('[name=delay]')?.addEventListener('input',ev=>{
+    clearTimeout(delayTimer);
+    delayTimer=setTimeout(onFilterChange,300);
   });
-}
-async function loadStrategy() {
-  try {
-    var r = await fetch('/api/strategy');
-    var s = await r.json();
-    if (strategyPicker && s.strategy) strategyPicker.value = s.strategy;
-  } catch(e) {}
-}
-
-/* ── 远程节点 ── */
-async function renderNodes() {
-  noResults.classList.add('hidden'); loading.classList.add('hidden');
-  try {
-    var r = await fetch('/api/nodes');
-    var s = await r.json();
-    var nodes = s.nodes || {};
-    var names = Object.keys(nodes);
-    filterCount.textContent = names.length;
-    avgLat.textContent = '--';
-    if (names.length === 0) {
-      proxyList.innerHTML = '<tr><td colspan="4" style="color:var(--text2);padding:40px;text-align:center">暂无远程节点<br><small>使用 API 添加: POST /api/nodes {action:"add",name:"xxx",url:"..."}</small></td></tr>';
-      return;
-    }
-    var html = '';
-    for (var name of names) {
-      var n = nodes[name];
-      var icon = n.status === 'ok' ? '✅' : n.status === 'down' ? '❌' : '⏳';
-      html += '<tr><td><strong>' + name + '</strong></td><td><code>' + n.url + '</code></td><td>' + icon + ' ' + n.status + '</td><td>代理 ' + (n.proxy_count||0) + '</td></tr>';
-    }
-    proxyList.innerHTML = html;
-  } catch(e) { console.error(e); }
-}
-
-/* ── 初始化 ── */
-async function init() {
-  await loadProxies();
-  await loadStats();
-  await loadNodeSelector();
-  await loadStrategy();
-  try {
-    const r = await fetch('/api/services');
-    const s = await r.json();
-    updateServiceUI(s);
-  } catch (e) {}
-  setInterval(() => { loadProxies(); loadStats(); loadNodeSelector(); }, 30000);
-}
-init();
+  let searchTimer;
+  document.querySelector('[name=search]')?.addEventListener('input',ev=>{
+    clearTimeout(searchTimer);
+    searchTimer=setTimeout(onFilterChange,300);
+  });
+  // Sort
+  document.querySelectorAll('thead th[data-sort]').forEach(th=>th.addEventListener('click',()=>onSort(th.dataset.sort)));
+  // Pagination delegation
+  document.getElementById('pagination')?.addEventListener('click',onPageClick);
+  // Copy delegation
+  document.querySelector('tbody')?.addEventListener('click',onCopy);
+  // Keyboard
+  document.addEventListener('keydown',onKeydown);
+  // Initial load
+  loadStats();
+  loadData();
+});

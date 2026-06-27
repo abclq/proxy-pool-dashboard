@@ -1,12 +1,11 @@
-FROM python:3.13-alpine
+FROM python:3.13-slim
 
 WORKDIR /app
 
-RUN pip install redis --no-cache-dir
+COPY requirements.txt .
+RUN pip install -r requirements.txt --no-cache-dir
 
-COPY dashboard.py .
-COPY new_fetcher.py .
-COPY ip2region/ ./ip2region/
+COPY *.py ./
 COPY data/ ./data/
 COPY static/ ./static/
 

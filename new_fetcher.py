@@ -4,11 +4,11 @@
 来源：ProxyScrape, docip, 89ip, clarketm, Thordata, hookzof, 
       Free-Proxy-List 系列, 快代理, ip3366, Data5u 等
 """
-import urllib.request, json, time, re, sys, os
+import urllib.request, json, time, re, sys, os, ssl, random
 
 # ── Redis 连接 ──
 import redis as redis_lib
-REDIS = redis_lib.Redis(host="proxy-redis", port=6379, db=1, decode_responses=True,
+REDIS = redis_lib.Redis(host=os.environ.get("REDIS_HOST", "proxy-redis"), port=6379, db=1, decode_responses=True,
                          socket_connect_timeout=5, socket_timeout=5)
 
 KEY_POOL = "proxies:pool"
@@ -64,15 +64,63 @@ def add_proxy(proxy_str, source, protocol="http"):
     })
     return True
 
-def fetch(url, timeout=15, json_response=False):
+# ── 代理池（用自己池子反爬被墙源） ──
+PROXY_CACHE = []
+PROXY_CACHE_TS = 0
+
+def _load_proxies():
+    global PROXY_CACHE, PROXY_CACHE_TS
+    now = time.time()
+    if now - PROXY_CACHE_TS < 60 and PROXY_CACHE:
+        return
+    PROXY_CACHE = []
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
-        resp = urllib.request.urlopen(req, timeout=timeout)
-        content = resp.read().decode("utf-8", errors="ignore")
-        return json.loads(content) if json_response else content
-    except Exception as e:
-        print(f"  ⚠ {url[:60]} → {e}")
+        members = REDIS.zrange(KEY_POOL, 0, 200)
+        for m in members:
+            proto = REDIS.hget(PFX_PROXY + m, "protocol") or ""
+            lat = REDIS.hget(PFX_PROXY + m, "latency") or "0"
+            if "http" in proto and lat.isdigit() and int(lat) > 0:
+                PROXY_CACHE.append(m)
+    except:
+        pass
+    PROXY_CACHE_TS = now
+
+def fetch(url, timeout=15, json_response=False, use_proxy=False):
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    
+    def _do_fetch(proxy=None):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
+            if proxy:
+                host, port = proxy.rsplit(":", 1)
+                req.set_proxy(f"{host}:{port}", "http")
+            resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
+            content = resp.read().decode("utf-8", errors="ignore")
+            return json.loads(content) if json_response else content
+        except Exception as e:
+            return None
+    
+    # try direct first
+    result = _do_fetch()
+    if result is not None:
+        return result
+    
+    # try with proxy
+    _load_proxies()
+    if not PROXY_CACHE:
+        print(f"  ⚠ {url[:60]} → no proxy available")
         return None
+    
+    random.shuffle(PROXY_CACHE)
+    for proxy in PROXY_CACHE[:10]:
+        result = _do_fetch(proxy)
+        if result is not None:
+            return result
+    
+    print(f"  ⚠ {url[:60]} → all proxies failed")
+    return None
 
 # ═══════════════════════════════════════════════
 # 1. ProxyScrape API
@@ -162,6 +210,102 @@ def fetch_proxy_table(name, url, source_label):
 # ═══════════════════════════════════════════════
 # 6. 快代理 Kuaidaili
 # ═══════════════════════════════════════════════
+# 积流代理
+def fetch_jiliu():
+    count = 0
+    for page in range(1, 11):
+        try:
+            html = fetch(f'https://www.jiliuip.com/free/page-{page}')
+            for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+)[^\d]+(\d+)', html):
+                count += add_proxy(f'{m.group(1)}:{m.group(2)}', 'jiliu')
+            time.sleep(1)
+        except Exception as e:
+            print(f'[jiliu] p{page} fail: {e}')
+    return count
+
+# 齐云代理
+def fetch_qiyun():
+    count = 0
+    try:
+        html = fetch('https://www.qiyunip.com/freeProxy/')
+        for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+)[^\d]+(\d+)', html):
+            count += add_proxy(f'{m.group(1)}:{m.group(2)}', 'qiyun')
+    except Exception as e:
+        print(f'[qiyun] fail: {e}')
+    return count
+
+# OpenProxyList
+def fetch_openproxylist():
+    count = 0
+    for proto, url in [
+        ('http', 'https://api.openproxylist.xyz/http.txt'),
+        ('socks4', 'https://api.openproxylist.xyz/socks4.txt'),
+        ('socks5', 'https://api.openproxylist.xyz/socks5.txt'),
+    ]:
+        try:
+            text = fetch(url)
+            for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
+                count += add_proxy(f'{m.group(1)}:{m.group(2)}', 'openproxylist', protocol=proto)
+        except Exception as e:
+            print(f'[openproxylist] {proto} fail: {e}')
+    return count
+
+# MuRongPIG (biggest single source)
+def fetch_murongpig():
+    count = 0
+    urls = [
+        ('https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt', 'murong'),
+        ('https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks4.txt', 'murong', 'socks4'),
+        ('https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt', 'murong', 'socks5'),
+    ]
+    for url, *rest in urls:
+        proto = rest[1] if len(rest) > 1 else 'http'
+        try:
+            text = fetch(url)
+            for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
+                count += add_proxy(f'{m.group(1)}:{m.group(2)}', 'murongpig', protocol=proto)
+        except Exception as e:
+            print(f'[murongpig] fail: {e}')
+    return count
+
+# VMHeaven
+def fetch_vmheaven():
+    count = 0
+    for proto, url in [
+        ('http', 'https://raw.githubusercontent.com/vmheaven/VMHeaven.io-Free-Proxy-List/main/http.txt'),
+        ('socks4', 'https://raw.githubusercontent.com/vmheaven/VMHeaven.io-Free-Proxy-List/main/socks4.txt'),
+        ('socks5', 'https://raw.githubusercontent.com/vmheaven/VMHeaven.io-Free-Proxy-List/main/socks5.txt'),
+    ]:
+        try:
+            text = fetch(url)
+            for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
+                count += add_proxy(f'{m.group(1)}:{m.group(2)}', 'vmheaven', protocol=proto)
+        except Exception as e:
+            print(f'[vmheaven] {proto} fail: {e}')
+    return count
+
+# jetkai
+def fetch_jetkai():
+    count = 0
+    try:
+        text = fetch('https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies.txt')
+        for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
+            count += add_proxy(f'{m.group(1)}:{m.group(2)}', 'jetkai')
+    except Exception as e:
+        print(f'[jetkai] fail: {e}')
+    return count
+
+# proxifly
+def fetch_proxifly_gh():
+    count = 0
+    try:
+        text = fetch('https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt')
+        for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
+            count += add_proxy(f'{m.group(1)}:{m.group(2)}', 'proxifly-gh')
+    except Exception as e:
+        print(f'[proxifly-gh] fail: {e}')
+    return count
+
 def fetch_kuaidaili():
     print("[快代理]")
     count = 0
@@ -228,6 +372,13 @@ if __name__ == "__main__":
     # 中国源
     total += fetch_kuaidaili()
     total += fetch_ip3366()
+    total += fetch_openproxylist()
+    total += fetch_murongpig()
+    total += fetch_vmheaven()
+    total += fetch_jetkai()
+    total += fetch_proxifly_gh()
+    total += fetch_jiliu()
+    total += fetch_qiyun()
     
     elapsed = time.time() - start_time
     pool_size = REDIS.zcard(KEY_POOL)

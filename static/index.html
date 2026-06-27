@@ -1,142 +1,99 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>代理池 Dashboard</title>
-<link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
-<link rel="stylesheet" href="style.css">
+<meta charset="utf-8">
+<title>Proxy Pool</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-  .badge-s { background: rgba(255, 215, 0, 0.15); color: #ffd700; border: 1px solid rgba(255, 215, 0, 0.3); }
-  .lat-s { color: #ffd700; font-weight: 700; }
-  .stat-card.verified .stat-icon { background: rgba(163, 113, 247, 0.15); color: var(--purple); }
+  :root {--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--accent:#58a6ff;--green:#3fb950;--yellow:#d2991d;--orange:#db6d28;--red:#f85149}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:16px 20px}
+  h2{font-size:15px;font-weight:600;color:#e6edf3;margin-bottom:12px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:12px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 12px}
+  .card .v{font-size:22px;font-weight:600;color:#e6edf3}
+  .card .l{font-size:11px;color:var(--muted);margin-top:2px}
+  .toolbar{display:flex;gap:6px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+  .toolbar select,.toolbar input{background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;outline:none;height:28px}
+  .toolbar select:focus,.toolbar input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(88,166,255,.15)}
+  .toolbar select{min-width:70px}
+  .toolbar input[type=number]{width:70px}
+  .toolbar input[type=text]{width:120px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  thead{position:sticky;top:0;z-index:1}
+  th{background:var(--surface);border-bottom:1px solid var(--border);padding:6px 8px;text-align:left;font-weight:600;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
+  th.sortable{cursor:pointer;user-select:none}
+  th.sortable:hover{color:var(--text)}
+  th.asc::after{content:' ↑'}
+  th.desc::after{content:' ↓'}
+  td{padding:5px 8px;border-bottom:1px solid rgba(48,54,61,.5);white-space:nowrap}
+  tr:hover td{background:rgba(88,166,255,.04)}
+  .empty{text-align:center;color:var(--muted);padding:30px}
+  .badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:11px;font-weight:600;line-height:1.4}
+  .badge.s{background:rgba(63,185,80,.15);color:var(--green)}
+  .badge.a{background:rgba(210,153,29,.15);color:var(--yellow)}
+  .badge.b{background:rgba(219,109,40,.15);color:var(--orange)}
+  .badge.c{background:rgba(248,81,73,.15);color:var(--red)}
+  .copy-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:1px 6px;font-size:10px;cursor:pointer}
+  .copy-btn:hover{color:var(--text);border-color:var(--accent)}
+  .pagination{display:flex;gap:4px;align-items:center;margin-top:12px;font-size:12px;color:var(--muted)}
+  .pagination a{color:var(--accent);text-decoration:none;padding:2px 6px;border-radius:4px}
+  .pagination a:hover{background:rgba(88,166,255,.1)}
+  .pagination .cur{background:var(--accent);color:#fff;border-radius:4px;padding:2px 6px}
+  tbody.loading{opacity:.4}
+  #toast{position:fixed;bottom:20px;right:20px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 14px;font-size:12px;color:var(--text);opacity:0;transition:opacity .15s;z-index:999}
+  #toast.show{opacity:1}
 </style>
 </head>
 <body>
-<div class="app">
-  <aside class="sidebar" id="sidebar">
-    <div class="sidebar-header">
-      <div class="logo"><i class="ri-server-line"></i><span>ProxyPool</span></div>
-    </div>
-    <nav class="sidebar-nav">
-      <a href="#" class="nav-item active" data-tab="all"><i class="ri-list-check"></i><span>全部代理</span></a>
-      <a href="#" class="nav-item" data-tab="china"><i class="ri-flag-2-line"></i><span>中国代理</span></a>
-      <a href="#" class="nav-item" data-tab="foreign"><i class="ri-earth-line"></i><span>国外代理</span></a>
-      <a href="#" class="nav-item" data-tab="s"><i class="ri-vip-crown-fill"></i><span>S 级代理</span></a>
-      <div class="nav-divider"></div>
-      <div class="nav-section-title">代理服务</div>
-      <div class="service-controls">
-        <div class="service-item">
-          <span class="service-label">HTTP</span>
-          <button id="btn-http" class="btn-service" data-service="http">启动</button>
-          <span class="service-status" id="status-http">:8080</span>
-        </div>
-        <div class="service-item">
-          <span class="service-label">SOCKS5</span>
-          <button id="btn-socks5" class="btn-service" data-service="socks5">启动</button>
-          <span class="service-status" id="status-socks5">:1080</span>
-        </div>
-      </div>
-      <div class="nav-divider"></div>
-      <div class="nav-section-title">节点选择</div>
-      <div class="node-selector">
-        <div id="selected-node" class="selected-node none">🔄 自动轮换</div>
-        <select id="node-picker" class="node-picker"><option value="">-- 选择节点 --</option></select>
-        <button class="btn btn-sm" id="btn-clear-node" disabled>清除</button>
-      </div>
-      <div class="nav-divider"></div>
-      <div class="nav-section-title">路由策略</div>
-      <div class="strategy-selector">
-        <select id="strategy-picker" class="node-picker">
-          <option value="balanced">⚖️ 均衡加权</option>
-          <option value="latency">⚡ 延迟优先</option>
-          <option value="sticky">📌 成功粘性</option>
-        </select>
-      </div>
-      <div class="nav-divider"></div>
-      <a href="#" class="nav-item" data-tab="nodes"><i class="ri-cloud-line"></i><span>远程节点</span></a>
-      <a href="#" class="nav-item" data-tab="regions"><i class="ri-pie-chart-2-line"></i><span>地区分布</span></a>
-    </nav>
-    <div class="sidebar-footer"><div class="version">v2.0</div></div>
-  </aside>
-
-  <main class="main-content">
-    <header class="topbar">
-      <div class="topbar-title">
-        <h1>代理池仪表盘</h1>
-        <p class="subtitle">高质量免费代理 · HTTP + SOCKS5 · 随机轮换</p>
-      </div>
-      <div class="topbar-actions">
-        <button id="refresh-btn" class="btn btn-primary"><i class="ri-refresh-line"></i><span>立即检测</span></button>
-      </div>
-    </header>
-
-    <!-- 统计卡 -->
-    <section class="stats-section">
-      <div class="stat-card total"><div class="stat-icon"><i class="ri-database-2-line"></i></div>
-        <div class="stat-content"><span class="stat-value" id="s-total">0</span><span class="stat-label">Raw Pool</span></div></div>
-      <div class="stat-card verified"><div class="stat-icon"><i class="ri-shield-check-line"></i></div>
-        <div class="stat-content"><span class="stat-value" id="s-verified">0</span><span class="stat-label">Verified</span></div></div>
-      <div class="stat-card s-tier"><div class="stat-icon"><i class="ri-vip-crown-fill"></i></div>
-        <div class="stat-content"><span class="stat-value" id="s-S">0</span><span class="stat-label">S 级 &lt;200ms</span></div></div>
-      <div class="stat-card a-tier"><div class="stat-icon"><i class="ri-flashlight-fill"></i></div>
-        <div class="stat-content"><span class="stat-value" id="s-A">0</span><span class="stat-label">A 级 &lt;500ms</span></div></div>
-      <div class="stat-card b-tier"><div class="stat-icon"><i class="ri-speed-line"></i></div>
-        <div class="stat-content"><span class="stat-value" id="s-B">0</span><span class="stat-label">B 级 &lt;1000ms</span></div></div>
-      <div class="stat-card c-tier"><div class="stat-icon"><i class="ri-hourglass-line"></i></div>
-        <div class="stat-content"><span class="stat-value" id="s-C">0</span><span class="stat-label">C 级</span></div></div>
-    </section>
-
-    <!-- 检测进度 -->
-    <section class="progress-section hidden" id="progress-section">
-      <div class="progress-info">
-        <span class="progress-label" id="status-text">就绪</span>
-        <span class="progress-sub" id="status-sub">-</span>
-        <span class="progress-text" id="progress-text">0/0</span></div>
-      <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
-    </section>
-
-    <!-- 筛选 + 导出 -->
-    <section class="filter-section">
-      <div class="filters">
-        <div class="filter-item"><label><i class="ri-map-pin-line"></i></label><select id="region-filter"><option value="">所有地区</option></select></div>
-        <div class="filter-item"><label><i class="ri-shield-keyhole-line"></i></label><select id="protocol-filter"><option value="">所有协议</option><option value="http">HTTP</option><option value="https">HTTPS</option></select></div>
-        <div class="filter-item"><label><i class="ri-speed-line"></i></label><select id="speed-filter"><option value="">所有质量</option><option value="S">S 级</option><option value="A">A 级</option><option value="B">B 级</option><option value="C">C 级</option></select></div>
-        <div class="filter-item search"><i class="ri-search-line"></i><input type="text" id="search-input" placeholder="搜索 IP..."></div>
-      </div>
-      <div class="export-actions">
-        <button class="btn btn-sm" id="exp-http"><i class="ri-global-line"></i> HTTP</button>
-        <button class="btn btn-sm" id="exp-https"><i class="ri-lock-line"></i> HTTPS</button>
-        <button class="btn btn-sm" id="exp-s"><i class="ri-vip-crown-fill"></i> S 级</button>
-        <button class="btn btn-sm" id="exp-china"><i class="ri-flag-2-line"></i> 中国</button>
-        <button class="btn btn-sm" id="exp-all"><i class="ri-download-line"></i> 全部</button>
-      </div>
-    </section>
-
-    <!-- 表格 -->
-    <section class="table-section">
-      <div class="table-header">
-        <span class="result-count"><span id="filtered-count">0</span> 条结果</span>
-        <span class="avg-latency">均延迟: <strong id="avg-latency">--</strong>ms</span>
-      </div>
-      <div class="table-wrapper">
-        <table><thead><tr>
-          <th>IP 地址</th><th>端口</th><th>协议</th><th>地区</th><th>速度</th><th>延迟</th><th>来源</th><th>操作</th>
-        </tr></thead><tbody id="proxy-list"></tbody></table>
-      </div>
-      <div id="loading" class="loading hidden"><div class="spinner"></div><p>加载中...</p></div>
-      <div id="no-results" class="no-results hidden"><i class="ri-inbox-line"></i><p>无匹配结果</p></div>
-    </section>
-
-    <!-- 分页 -->
-    <section class="pagination">
-      <button class="btn-page" id="prev-page" disabled><i class="ri-arrow-left-s-line"></i></button>
-      <span class="page-info"><span id="current-page">1</span> / <span id="total-pages">1</span></span>
-      <button class="btn-page" id="next-page"><i class="ri-arrow-right-s-line"></i></button>
-    </section>
-  </main>
-</div>
-<div id="toast" class="toast hidden">已复制</div>
-<script src="app.js"></script>
+  <h2>Proxy Pool Dashboard</h2>
+  <div class="cards">
+    <div class="card"><div class="v" id="v-total">-</div><div class="l">Total</div></div>
+    <div class="card"><div class="v" id="v-s">-</div><div class="l">S &lt;500ms</div></div>
+    <div class="card"><div class="v" id="v-a">-</div><div class="l">A &lt;1s</div></div>
+    <div class="card"><div class="v" id="v-b">-</div><div class="l">B &lt;3s</div></div>
+    <div class="card"><div class="v" id="v-c">-</div><div class="l">C ≥3s</div></div>
+    <div class="card"><div class="v" id="v-cn">-</div><div class="l">中国</div></div>
+  </div>
+  <div class="toolbar">
+    <select name="grade">
+      <option value="">全部评级</option>
+      <option value="s">S &lt;500ms</option>
+      <option value="a">A &lt;1s</option>
+      <option value="b">B &lt;3s</option>
+      <option value="c">C ≥3s</option>
+    </select>
+    <select name="country">
+      <option value="">全部地区</option>
+      <option value="!CN">海外</option>
+    </select>
+    <select name="protocol">
+      <option value="">全部协议</option>
+      <option value="http">HTTP</option>
+      <option value="https">HTTPS</option>
+      <option value="socks5">SOCKS5</option>
+      <option value="socks4">SOCKS4</option>
+    </select>
+    <input type="number" name="delay" placeholder="延迟上限 ms" min="0" step="100">
+    <input type="text" name="search" placeholder="搜索 IP…">
+  </div>
+  <table>
+    <thead><tr>
+      <th>IP</th>
+      <th data-sort="port" class="sortable">端口</th>
+      <th data-sort="protocol" class="sortable">协议</th>
+      <th data-sort="grade" class="sortable">评级</th>
+      <th data-sort="delay" class="sortable">延迟</th>
+      <th data-sort="location" class="sortable">地区</th>
+      <th data-sort="region" class="sortable">代码</th>
+      <th data-sort="source" class="sortable">来源</th>
+      <th data-sort="anon" class="sortable">匿名</th>
+      <th data-sort="last_check" class="sortable">检测</th>
+    </tr></thead>
+    <tbody><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
+  </table>
+  <div id="pagination" class="pagination"></div>
+  <div id="toast"></div>
+  <script src="/app.js?v=11"></script>
 </body>
 </html>
