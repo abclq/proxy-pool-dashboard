@@ -40,7 +40,7 @@ function buildCountryDropdown(){
   while(sel.options.length>2)sel.remove(2);
   const regions=Object.entries(statsCache.regions).sort((a,b)=>b[1]-a[1]);
   for(const[code,_n]of regions){
-    // CN gets its own option alongside !CN
+    if(code==='?')continue;
     const name=COUNTRY_NAME[code]||code;
     const opt=document.createElement('option');
     opt.value=code;
@@ -83,6 +83,7 @@ async function loadData(){
     STATE.page=data.page||1;
     renderTable(data.proxies||[]);
     renderPagination();
+    buildProtocolDropdown(STATE.filters.country);
   }catch(e){
     if(e.name!=='AbortError'){
       console.error('load',e);
@@ -90,6 +91,40 @@ async function loadData(){
     }
   }finally{
     tbody.classList.remove('loading');
+  }
+}
+
+function buildProtocolDropdown(country){
+  const sel=document.querySelector('[name=protocol]');
+  if(!sel||!statsCache)return;
+  const prev=sel.value;
+  while(sel.options.length>1)sel.remove(1);
+  const allProtos=Object.entries(statsCache.protocols).sort((a,b)=>b[1]-a[1]);
+  let protoSet=new Set(['http','https','socks4','socks5']);
+  if(country){
+    const q=new URLSearchParams({country:country,limit:'200'});
+    api('/api/proxies?'+q.toString()).then(r=>{
+      const protocols=new Set();
+      (r.proxies||[]).forEach(p=>protocols.add(p.protocol||'?'));
+      protocols.forEach(p=>protoSet.add(p));
+      while(sel.options.length>1)sel.remove(1);
+      protoSet.forEach(p=>{
+        const opt=document.createElement('option');
+        opt.value=p;
+        opt.textContent=p==='http'?'HTTP':p==='https'?'HTTPS':p==='socks5'?'SOCKS5':'SOCKS4';
+        sel.appendChild(opt);
+      });
+      sel.value=prev;
+    }).catch(()=>{});
+  }else{
+    allProtos.forEach(([code,count])=>{
+      if(code==='?')return;
+      const opt=document.createElement('option');
+      opt.value=code;
+      opt.textContent=code==='http'?'HTTP':code==='https'?'HTTPS':code==='socks5'?'SOCKS5':'SOCKS4'+' ('+count+')';
+      sel.appendChild(opt);
+    });
+    sel.value=prev;
   }
 }
 
@@ -124,7 +159,7 @@ function renderPagination(){
   let start=Math.max(1,page-Math.floor(MAX_PAGE/2));
   let end=Math.min(pages,start+MAX_PAGE-1);
   if(end-start+1<MAX_PAGE)start=Math.max(1,end-MAX_PAGE+1);
-  if(page>1)html+=`<a href="#" data-page="1">«</a><a href="#" data-page="${page-1}">‹</a>`;
+  if(page>1)html+=`<a href="#" data-page="1">‹</a><a href="#" data-page="${page-1}">‹</a>`;
   for(let i=start;i<=end;i++){
     if(i===page)html+=`<span class="cur">${i}</span>`;
     else html+=`<a href="#" data-page="${i}">${i}</a>`;
@@ -132,8 +167,6 @@ function renderPagination(){
   if(page<pages)html+=`<a href="#" data-page="${page+1}">›</a><a href="#" data-page="${pages}">»</a>`;
   nav.innerHTML=html;
 }
-
-// ─── Event handlers ──────────────────────────────────────────────────
 
 function onFilterChange(){
   readFilters();
@@ -165,9 +198,8 @@ function onCopy(ev){
     toast.classList.add('show');
     setTimeout(()=>toast.classList.remove('show'),1500);
   }).catch(()=>{
-    // fallback
     const ta=document.createElement('textarea');
-    ta.value=text;ta.style.position='fixed';ta.style.opacity='0';
+    ta.value=text;ta.style.position='fixed';ta.style.opacity=0;
     document.body.appendChild(ta);ta.select();
     document.execCommand('copy');document.body.removeChild(ta);
   });
@@ -180,11 +212,16 @@ function onKeydown(ev){
   if(ev.key==='ArrowRight'){if(STATE.page<STATE.pages){STATE.page++;loadData();}}
 }
 
-// ─── Init ────────────────────────────────────────────────────────────
-
 window.addEventListener('DOMContentLoaded',()=>{
-  // Filter change events
-  document.querySelectorAll('[name=grade],[name=country],[name=protocol]').forEach(el=>el.addEventListener('change',onFilterChange));
+  const countrySel=document.querySelector('[name=country]');
+  const protocolSel=document.querySelector('[name=protocol]');
+  countrySel?.addEventListener('change',()=>{
+    readFilters();
+    STATE.page=1;
+    buildProtocolDropdown(STATE.filters.country);
+  });
+  protocolSel?.addEventListener('change',onFilterChange);
+  document.querySelectorAll('[name=grade]').forEach(el=>el.addEventListener('change',onFilterChange));
   let delayTimer;
   document.querySelector('[name=delay]')?.addEventListener('input',ev=>{
     clearTimeout(delayTimer);
@@ -195,15 +232,10 @@ window.addEventListener('DOMContentLoaded',()=>{
     clearTimeout(searchTimer);
     searchTimer=setTimeout(onFilterChange,300);
   });
-  // Sort
   document.querySelectorAll('thead th[data-sort]').forEach(th=>th.addEventListener('click',()=>onSort(th.dataset.sort)));
-  // Pagination delegation
   document.getElementById('pagination')?.addEventListener('click',onPageClick);
-  // Copy delegation
   document.querySelector('tbody')?.addEventListener('click',onCopy);
-  // Keyboard
   document.addEventListener('keydown',onKeydown);
-  // Initial load
   loadStats();
   loadData();
 });
