@@ -116,7 +116,7 @@ def build_proxy(member, hd, jm):
     proto = (hd.get("protocol") or "").lower().strip()
     if not proto or proto == "unknown": proto = "https" if jd.get("https") else "?"
     return {"ip": ip, "port": port, "protocol": proto, "delay": delay,
-            "grade": grade_for_delay(delay), "region": country, "location": location,
+            "grade": grade_for_delay(delay), "region": normalize_country(country), "location": location,
             "source": hd.get("source") or jd.get("source", "?"),
             "anon": hd.get("anonymous") or jd.get("anonymous", "?"),
             "last_check": hd.get("last_check", "?"), "is_china": country == "CN"}
