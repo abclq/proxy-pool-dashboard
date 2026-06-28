@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""frontend — serves static files on 5050, proxies /api/* to backend:5051."""
+"""frontend - serves static files on 5050, proxies /api/* to backend:5051."""
 import os, urllib.request, json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 

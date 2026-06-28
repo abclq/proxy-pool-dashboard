@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""GeoIP resolver — online APIs + Redis cache + proxy-pool rotation.
+"""GeoIP resolver - online APIs + Redis cache + proxy-pool rotation.
 
 Accuracy policy:
 - Source of truth is online Geo APIs, not stale local xdb.
@@ -11,6 +11,8 @@ Accuracy policy:
 import json, os, time, threading, random
 import redis
 import urllib.request
+import urllib.parse
+import urllib.error
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "proxy-redis")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
@@ -169,9 +171,12 @@ def _load_proxy_pool():
 
 
 def _open_url(req, timeout=HTTP_TIMEOUT):
-    # 先直连一次；失败/限流再用池子代理轮换。
+    # 先直连；遇到 403/429/限流或失败，再用池子代理轮换。
     try:
         return urllib.request.urlopen(req, timeout=timeout).read()
+    except urllib.error.HTTPError as e:
+        if e.code not in (403, 429, 503):
+            return None
     except Exception:
         pass
     for pxy in _load_proxy_pool()[:20]:
@@ -213,21 +218,80 @@ def _query_one(ip):
     arr = _query_batch([ip])
     if arr:
         return arr[0]
-    # fallback
+    for fn in (_query_ip9, _query_freeipapi, _query_ipwhois):
+        data = fn(ip)
+        if data:
+            return data
+    return None
+
+
+def _json_get(url, timeout=8):
+    req = urllib.request.Request(url, headers={"User-Agent": "proxy-dashboard/geo"})
+    raw = _open_url(req, timeout=timeout)
+    if not raw:
+        return None
     try:
-        req = urllib.request.Request(f"https://api.ip2location.io/?ip={ip}", headers={"User-Agent": "proxy-dashboard/geo"})
-        raw = _open_url(req, timeout=8)
-        if not raw:
-            return None
-        d = json.loads(raw.decode("utf-8", errors="ignore"))
-        cc = (d.get("country_code") or "").upper()
-        if cc:
-            return {"status": "success", "country": d.get("country_name", ""),
-                    "countryCode": cc, "regionName": d.get("region_name", ""),
-                    "city": d.get("city_name", ""), "query": ip, "source": "ip2location"}
+        return json.loads(raw.decode("utf-8", errors="ignore"))
     except Exception:
         return None
-    return None
+
+
+def _normalize(ip, country_code, country, region, city, source):
+    cc = (country_code or "").upper()
+    if not cc:
+        return None
+    return {
+        "status": "success",
+        "country": country or COUNTRY_CODE.get(cc, cc),
+        "countryCode": cc,
+        "regionName": region or "",
+        "city": city or "",
+        "query": ip,
+        "source": source,
+    }
+
+
+def _query_ip9(ip):
+    d = _json_get("https://ip9.com.cn/get?ip=" + urllib.parse.quote(ip), timeout=8)
+    if not d or d.get("msg") == "Error":
+        return None
+    data = d.get("data") if isinstance(d.get("data"), dict) else d
+    return _normalize(
+        ip,
+        data.get("country_code") or data.get("countryCode") or data.get("code"),
+        data.get("country") or data.get("country_name"),
+        data.get("prov") or data.get("province") or data.get("region") or data.get("regionName"),
+        data.get("city") or data.get("cityName"),
+        "ip9",
+    )
+
+
+def _query_freeipapi(ip):
+    d = _json_get("https://freeipapi.com/api/json/" + urllib.parse.quote(ip), timeout=8)
+    if not d:
+        return None
+    return _normalize(
+        ip,
+        d.get("countryCode"),
+        d.get("countryName"),
+        d.get("regionName"),
+        d.get("cityName"),
+        "freeipapi",
+    )
+
+
+def _query_ipwhois(ip):
+    d = _json_get("https://ipwhois.app/json/" + urllib.parse.quote(ip) + "?lang=zh-CN", timeout=8)
+    if not d or d.get("success") is False:
+        return None
+    return _normalize(
+        ip,
+        d.get("country_code"),
+        d.get("country"),
+        d.get("region"),
+        d.get("city"),
+        "ipwhois",
+    )
 
 
 def start_filler():
