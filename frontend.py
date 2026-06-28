@@ -2,6 +2,10 @@
 """frontend - serves static files on 5050, proxies /api/* to backend:5051."""
 import os, urllib.request, json
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 BACKEND = "http://127.0.0.1:5051"
@@ -57,4 +61,4 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     os.makedirs(STATIC, exist_ok=True)
     print("Frontend on :5050")
-    HTTPServer(("0.0.0.0", 5050), H).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", 5050), H).serve_forever()

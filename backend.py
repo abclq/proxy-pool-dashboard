@@ -22,6 +22,8 @@ BAD_IPS = {"0.0.0.0", "127.0.0.1", "localhost", "::1"}
 _jhao_cache = {"t": 0, "d": {}}
 _index_lock = threading.Lock()
 _index_building = False
+_stats_cache = {"t": 0, "d": None}
+_stats_lock = threading.Lock()
 
 COUNTRY_NAME = {
     "CN": "中国", "HK": "香港", "TW": "台湾", "MO": "澳门", "US": "美国",
@@ -29,6 +31,32 @@ COUNTRY_NAME = {
     "IN": "印度", "VN": "越南", "MY": "马来西亚", "PH": "菲律宾", "GB": "英国",
     "DE": "德国", "FR": "法国", "RU": "俄罗斯", "BR": "巴西", "CA": "加拿大",
 }
+COUNTRY_ALIAS = {v: k for k, v in COUNTRY_NAME.items()}
+COUNTRY_ALIAS.update({
+    "CHINA": "CN", "中国": "CN", "UNITED STATES": "US", "USA": "US",
+    "UNITED KINGDOM": "GB", "UK": "GB", "GREAT BRITAIN": "GB",
+    "NETHERLANDS": "NL", "GERMANY": "DE", "FRANCE": "FR", "CANADA": "CA",
+    "RUSSIA": "RU", "INDIA": "IN", "INDONESIA": "ID", "BRAZIL": "BR",
+    "SINGAPORE": "SG", "JAPAN": "JP", "SOUTH KOREA": "KR", "KOREA": "KR",
+    "THAILAND": "TH", "VIET NAM": "VN", "VIETNAM": "VN", "PHILIPPINES": "PH",
+    "HONG KONG": "HK", "TAIWAN": "TW", "MACAO": "MO", "MACAU": "MO",
+    "SPAIN": "ES", "ITALY": "IT", "POLAND": "PL", "SWEDEN": "SE", "FINLAND": "FI",
+    "AUSTRALIA": "AU", "MEXICO": "MX", "COLOMBIA": "CO", "ARGENTINA": "AR",
+    "BANGLADESH": "BD", "MALAYSIA": "MY", "TÜRKIYE": "TR", "TURKEY": "TR",
+    "IRAN": "IR", "UKRAINE": "UA", "SOUTH AFRICA": "ZA", "SEYCHELLES": "SC",
+    "KAZAKHSTAN": "KZ", "UNITED ARAB EMIRATES": "AE", "IRELAND": "IE",
+    "DENMARK": "DK", "AUSTRIA": "AT", "PERU": "PE", "ECUADOR": "EC",
+    "CHILE": "CL", "CAMBODIA": "KH", "ROMANIA": "RO", "COSTA RICA": "CR",
+    "LATVIA": "LV", "CYPRUS": "CY", "MONGOLIA": "MN", "EGYPT": "EG",
+    "KENYA": "KE", "PANAMA": "PA", "ISLE OF MAN": "IM", "DOMINICAN REPUBLIC": "DO",
+})
+
+def normalize_country(country):
+    c = (country or "").strip()
+    if not c or c in ("unknown", "?", "0"): return ""
+    up = c.upper()
+    if len(up) == 2 and up.isascii() and up.isalpha(): return up
+    return COUNTRY_ALIAS.get(c) or COUNTRY_ALIAS.get(up) or up
 
 def jhao_map():
     now = time.time()
@@ -69,8 +97,8 @@ def grade_for_delay(delay):
 def geo_from_hash_or_cache(ip, hd):
     country = (hd.get("country") or hd.get("region") or "").strip()
     location = (hd.get("location") or hd.get("region_label") or hd.get("city") or "").strip()
-    if country and country not in ("unknown", "?", "0"):
-        country = country.upper()
+    country = normalize_country(country)
+    if country:
         if not location or location in ("unknown", "?", "0"):
             location = COUNTRY_NAME.get(country, country)
         return country, location
@@ -249,18 +277,40 @@ class H(BaseHTTPRequestHandler):
             except BrokenPipeError: pass
             return
         if path == "/api/stats":
-            total = r1.zcard("proxies:pool"); ensure_index_async(); sample = fetch_members_range(0, 2999)
-            grades = {"s":0,"a":0,"b":0,"c":0}; protos = {}; regions = {}; china = 0
-            for px in sample:
-                grades[px["grade"]] = grades.get(px["grade"], 0) + 1; protos[px["protocol"]] = protos.get(px["protocol"], 0) + 1
-                regions[px["region"]] = regions.get(px["region"], 0) + 1
-                if px["is_china"]: china += 1
-            # Prefer exact region index counts when ready.
-            if index_ready():
-                try:
-                    regions = {k.split(":",2)[2]: r1.scard(k) for k in r1.scan_iter("idx:country:*")}
-                except Exception: pass
-            self._json({"total": total, "sample": len(sample), "grades": grades, "protocols": protos, "china": china, "regions": dict(sorted(regions.items(), key=lambda x: -x[1])[:80]), "index_ready": index_ready()})
+            total = r1.zcard("proxies:pool"); ensure_index_async(); now = time.time()
+            with _stats_lock:
+                cached = _stats_cache["d"] if now - _stats_cache["t"] < 30 else None
+                if cached is None or cached.get("total") != total:
+                    grades = {"s":0,"a":0,"b":0,"c":0}; protos = {}; regions = {}; china = 0; seen = 0
+                    batch = 5000
+                    for off in range(0, total, batch):
+                        members = r1.zrange("proxies:pool", off, min(total - 1, off + batch - 1))
+                        pipe = r1.pipeline(transaction=False)
+                        for m in members: pipe.hgetall(f"proxy:{m}")
+                        for m, hd in zip(members, pipe.execute()):
+                            if not parse_member(m)[0]: continue
+                            seen += 1
+                            delay = safe_float((hd or {}).get("latency") or (hd or {}).get("delay"), 0.0)
+                            g = grade_for_delay(delay); grades[g] = grades.get(g, 0) + 1
+                            proto = ((hd or {}).get("protocol") or "?").lower().strip() or "?"
+                            if proto == "unknown": proto = "?"
+                            protos[proto] = protos.get(proto, 0) + 1
+                            country = normalize_country(((hd or {}).get("country") or (hd or {}).get("region") or "").strip()) or "?"
+                            regions[country] = regions.get(country, 0) + 1
+                            if country == "CN": china += 1
+                    if index_ready():
+                        try:
+                            grades = {g: r1.scard(idx_key("grade", g)) for g in ("s", "a", "b", "c")}
+                            protos = {k.split(":", 2)[2]: r1.scard(k) for k in r1.scan_iter("idx:proto:*")}
+                            regions = {k.split(":", 2)[2]: r1.scard(k) for k in r1.scan_iter("idx:country:*")}
+                            china = regions.get("CN", 0)
+                        except Exception:
+                            pass
+                    cached = {"total": total, "sample": seen, "grades": grades, "protocols": protos,
+                              "china": china, "regions": dict(sorted(regions.items(), key=lambda x: -x[1])[:80]),
+                              "index_ready": index_ready(), "stats_cached_at": int(now)}
+                    _stats_cache["d"] = cached; _stats_cache["t"] = now
+            self._json(cached)
             return
         self._json({"error":"not found"}, 404)
 
