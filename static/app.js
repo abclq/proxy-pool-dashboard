@@ -224,7 +224,8 @@ function onKeydown(ev){
   if(ev.key==='ArrowRight'){if(STATE.page<STATE.pages){STATE.page++;loadData();}}
 }
 
-window.addEventListener('DOMContentLoaded',()=>{
+function init(){
+  if(STATE._ready)return;STATE._ready=1;
   const countrySel=document.querySelector('[name=country]');
   const protocolSel=document.querySelector('[name=protocol]');
   countrySel?.addEventListener('change',()=>{
@@ -251,4 +252,5 @@ window.addEventListener('DOMContentLoaded',()=>{
   document.querySelector('tbody')?.addEventListener('click',onCopy);
   document.addEventListener('keydown',onKeydown);
   loadStats();
-});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
