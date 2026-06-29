@@ -13,11 +13,13 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 HOST = os.environ.get("REDIS_HOST", "proxy-redis")
-r0 = redis.Redis(host=HOST, port=6379, db=0, decode_responses=True)
-r1 = redis.Redis(host=HOST, port=6379, db=1, decode_responses=True)
+r0 = redis.Redis(host=HOST, port=6379, db=0, decode_responses=True,
+                  socket_timeout=5, socket_connect_timeout=3)
+r1 = redis.Redis(host=HOST, port=6379, db=1, decode_responses=True,
+                  socket_timeout=5, socket_connect_timeout=3)
 PER_PAGE = 50
 MAX_LIMIT = 200
-CACHE_TTL = 10
+CACHE_TTL = 60
 INDEX_TTL = 900
 BAD_IPS = {"0.0.0.0", "127.0.0.1", "localhost", "::1"}
 _jhao_cache = {"t": 0, "d": {}}

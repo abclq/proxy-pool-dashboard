@@ -25,6 +25,19 @@ except Exception as e:
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
 
 def geo_lookup(ip):
+    """优先本地离线库 geo._local_lookup，回退 ip2region xdb"""
+    # 1. Try geo module's local binary DB
+    try:
+        import geo
+        cc = geo._local_lookup(ip)
+        if cc != "ZZ":
+            country = geo.COUNTRY_CODE.get(cc, cc)
+            is_cn = cc == "CN"
+            return f"{country}|{cc}|", is_cn
+    except Exception:
+        pass
+
+    # 2. Fallback to ip2region xdb
     if not IP2R:
         return "unknown", False
     try:

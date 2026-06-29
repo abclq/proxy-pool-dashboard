@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
-"""GeoIP resolver - online APIs + Redis cache + proxy-pool rotation.
+"""GeoIP resolver - online APIs + local binary DB + Redis cache + proxy-pool rotation.
 
-Accuracy policy:
-- Source of truth is online Geo APIs, not stale local xdb.
-- Cache every result into Redis DB1: geo:<ip> and proxy:<ip:port> country/location when caller has a proxy key.
-- GEO_TTL = 7 days: stale geo is batch-refreshed automatically by background filler.
-- API requests rotate through the existing proxy pool to avoid single-egress IP rate limits.
+Local offline DB: data/ipdb.bin (DB-IP Country Lite, binary format).
+Loads on startup, updates monthly. 二分查找, ~1μs per lookup.
+Cache: Redis DB1 geo:<ip> + proxy:<ip:port> country/location.
+API requests rotate through proxy pool to avoid rate limits.
 """
 
-import json, os, time, threading, random
+import json, os, time, threading, random, struct, socket
 import redis
 import urllib.request
 import urllib.parse
@@ -22,6 +21,9 @@ GEO_TTL = 7 * 24 * 3600
 FILL_INTERVAL = 600
 BATCH_SIZE = 45
 HTTP_TIMEOUT = 12
+LOCAL_DB_PATH = os.environ.get("IPDB_PATH", os.path.join(os.path.dirname(__file__), "data", "ipdb.bin"))
+LOCAL_DB_UPDATE_URL = "https://download.db-ip.com/free/dbip-country-lite-{year}-{month:02d}.csv.gz"
+LOCAL_DB_UPDATE_INTERVAL = 30 * 24 * 3600  # 每月更新
 
 COUNTRY_CODE = {
     "CN": "中国", "US": "美国", "JP": "日本", "KR": "韩国", "GB": "英国",
@@ -44,12 +46,155 @@ COUNTRY_CODE = {
     "HK": "香港", "TW": "台湾", "MO": "澳门",
 }
 
+# ═══════════ Local Binary IP Database (offline, ~1μs lookup) ═══════════
+
+_local_db = {"entries": [], "loaded": False, "lock": threading.Lock()}
+
+
+def _load_local_db(path=None):
+    """Load binary IP range database into memory. 3.5MB for 355K entries."""
+    path = path or LOCAL_DB_PATH
+    with _local_db["lock"]:
+        if _local_db["loaded"]:
+            return True
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, "rb") as f:
+                count = struct.unpack("<I", f.read(4))[0]
+                entries = []
+                for _ in range(count):
+                    data = f.read(10)
+                    if len(data) < 10:
+                        break
+                    start_int = struct.unpack("<I", data[0:4])[0]
+                    end_int = struct.unpack("<I", data[4:8])[0]
+                    country = data[8:10].decode("ascii").rstrip("\x00")
+                    entries.append((start_int, end_int, country))
+            entries.sort(key=lambda x: x[0])
+            _local_db["entries"] = entries
+            _local_db["loaded"] = True
+            return True
+        except Exception:
+            return False
+
+
+def _local_lookup(ip_str):
+    """Binary search for country code. Returns 'ZZ' if not found."""
+    if not _local_db["loaded"]:
+        _load_local_db()
+    entries = _local_db["entries"]
+    if not entries:
+        return "ZZ"
+    try:
+        target = struct.unpack("!I", socket.inet_aton(ip_str))[0]
+    except Exception:
+        return "ZZ"
+    lo, hi = 0, len(entries) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        s, e, c = entries[mid]
+        if target < s:
+            hi = mid - 1
+        elif target > e:
+            lo = mid + 1
+        else:
+            return c
+    return "ZZ"
+
+
+def _update_local_db():
+    """Download latest DB-IP Country Lite CSV and rebuild binary DB."""
+    import gzip, datetime
+    now = datetime.datetime.utcnow()
+    url = LOCAL_DB_UPDATE_URL.format(year=now.year, month=now.month)
+    csv_gz_path = "/tmp/dbip-latest.csv.gz"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "proxy-dashboard/geo-updater"})
+        raw = urllib.request.urlopen(req, timeout=60).read()
+        with open(csv_gz_path, "wb") as f:
+            f.write(raw)
+    except Exception:
+        return False
+    entries = []
+    try:
+        with gzip.open(csv_gz_path, "rt", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split(",")
+                if len(parts) < 3 or ":" in parts[0]:
+                    continue
+                try:
+                    start_int = struct.unpack("!I", socket.inet_aton(parts[0]))[0]
+                    end_int = struct.unpack("!I", socket.inet_aton(parts[1]))[0]
+                except Exception:
+                    continue
+                entries.append((start_int, end_int, parts[2]))
+    except Exception:
+        return False
+    if len(entries) < 100000:
+        return False
+    entries.sort(key=lambda x: x[0])
+    tmp_path = LOCAL_DB_PATH + ".tmp"
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(struct.pack("<I", len(entries)))
+            for start_int, end_int, country in entries:
+                country_bytes = country.encode("ascii")[:2].ljust(2, b"\x00")
+                f.write(struct.pack("<II", start_int, end_int))
+                f.write(country_bytes)
+        os.rename(tmp_path, LOCAL_DB_PATH)
+        with _local_db["lock"]:
+            _local_db["entries"] = entries
+            _local_db["loaded"] = True
+        return True
+    except Exception:
+        return False
+
+
+def _local_db_updater_loop():
+    """Background thread: update local DB monthly."""
+    while True:
+        try:
+            _update_local_db()
+        except Exception:
+            pass
+        time.sleep(LOCAL_DB_UPDATE_INTERVAL)
+
+
+# ═══════════ API resolver + Redis cache ═══════════
+
 _fill_thread = None
 _fill_running = False
 _proxy_cache = {"t": 0, "d": []}
 
 
+def resolve(ip):
+    # 1. Local binary DB (fastest, offline)
+    cc = _local_lookup(ip)
+    if cc != "ZZ":
+        country = COUNTRY_CODE.get(cc, cc)
+        return country
+
+    # 2. Redis cache
+    data = _cached(ip)
+    if data and not data.get("_placeholder"):
+        return _format_location(data)
+
+    # 3. Enqueue for online API lookup
+    _enqueue_ip(ip)
+    return "..."
+
+
 def resolve_region(ip):
+    # 1. Local binary DB
+    cc = _local_lookup(ip)
+    if cc != "ZZ":
+        return cc
+
+    # 2. Redis cache
     data = _cached(ip)
     if not data or data.get("_placeholder"):
         _enqueue_ip(ip)
@@ -57,19 +202,21 @@ def resolve_region(ip):
     return data.get("countryCode", "?") or "?"
 
 
-def resolve(ip):
-    data = _cached(ip)
-    if not data or data.get("_placeholder"):
-        _enqueue_ip(ip)
-        return "..."
-    return _format_location(data)
-
-
 def resolve_and_store(ip, proxy_key=None, force=False):
     """Resolve one IP now and write geo cache + optional proxy hash fields."""
     if not force:
         data = _cached(ip)
         if data and not data.get("_placeholder"):
+            if proxy_key:
+                _write_proxy_geo(proxy_key, data)
+            return data
+        # Check local DB
+        cc = _local_lookup(ip)
+        if cc != "ZZ":
+            data = {"status": "success", "country": COUNTRY_CODE.get(cc, cc),
+                    "countryCode": cc, "regionName": "", "city": "",
+                    "query": ip, "source": "local-db", "geo_updated_at": int(time.time())}
+            _store(ip, data)
             if proxy_key:
                 _write_proxy_geo(proxy_key, data)
             return data
@@ -361,6 +508,9 @@ def _fill_cycle():
 
 
 def _init():
+    _load_local_db()
+    t = threading.Thread(target=_local_db_updater_loop, daemon=True)
+    t.start()
     start_filler()
 
 _searcher = None
