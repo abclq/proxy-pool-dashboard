@@ -78,29 +78,25 @@ function buildURL(){
   return '/api/proxies?'+p.toString();
 }
 
-async function loadData(retries=2){
-  if(abortCtrl)abortCtrl.abort();
-  abortCtrl=new AbortController();
+async function loadData(){
   const tbody=document.querySelector('tbody');
   tbody.classList.add('loading');
-  for(let i=0;i<=retries;i++){
-    try{
-      const data=await api(buildURL(),abortCtrl.signal);
-      STATE.pages=data.pages||1;
-      STATE.page=data.page||1;
-      renderTable(data.proxies||[]);
-      renderPagination();
-      buildProtocolDropdown(STATE.filters.country);
-      tbody.classList.remove('loading');
-      return;
-    }catch(e){
-      if(e.name==='AbortError'){tbody.classList.remove('loading');return;}
-      if(i===retries){
-        tbody.classList.remove('loading');
-        document.querySelector('tbody').innerHTML='<tr><td colspan="10">加载失败，<a href="#" onclick="loadData();return false">重试</a></td></tr>';
-      }else{await new Promise(r=>setTimeout(r,1000));}
+  try{
+    if(abortCtrl)abortCtrl.abort();
+    abortCtrl=new AbortController();
+    const data=await api(buildURL(),abortCtrl.signal);
+    STATE.pages=data.pages||1;
+    STATE.page=data.page||1;
+    renderTable(data.proxies||[]);
+    renderPagination();
+    buildProtocolDropdown(STATE.filters.country);
+  }catch(e){
+    if(e.name!=='AbortError'){
+      document.querySelector('tbody').innerHTML='<tr><td colspan="10">加载失败，<a href="#" onclick="loadData();return false">重试</a></td></tr>';
+      document.getElementById('pagination').innerHTML='';
     }
   }
+  tbody.classList.remove('loading');
 }
 
 function buildProtocolDropdown(country){
@@ -251,8 +247,8 @@ window.addEventListener('DOMContentLoaded',()=>{
   });
   document.querySelectorAll('thead th[data-sort]').forEach(th=>th.addEventListener('click',()=>onSort(th.dataset.sort)));
   document.getElementById('pagination')?.addEventListener('click',onPageClick);
+  document.getElementById('btn-query')?.addEventListener('click',()=>{STATE.page=1;loadData();});
   document.querySelector('tbody')?.addEventListener('click',onCopy);
   document.addEventListener('keydown',onKeydown);
   loadStats();
-  loadData();
 });
