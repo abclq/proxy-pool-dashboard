@@ -15,6 +15,7 @@ BZ:"伯利兹",CW:"库拉索",EE:"爱沙尼亚",LT:"立陶宛",VE:"委内瑞拉"
 BO:"玻利维亚",SY:"叙利亚",VG:"英属维京",HN:"洪都拉斯",PY:"巴拉圭",IQ:"伊拉克",
 RS:"塞尔维亚",ZW:"津巴布韦",GT:"危地马拉",DO:"多米尼加",SC:"塞舌尔",CR:"哥斯达黎加",
 IM:"马恩岛",PA:"巴拿马",MN:"蒙古",LV:"拉脱维亚",CY:"塞浦路斯",
+LY:"利比亚",NP:"尼泊尔",OM:"阿曼",HU:"匈牙利",
 };
 
 function esc(s){if(s==null)return'';const d=document.createElement('div');d.appendChild(document.createTextNode(String(s)));return d.innerHTML;}

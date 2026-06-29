@@ -45,6 +45,7 @@ COUNTRY_NAME = {
     "RS": "塞尔维亚", "ZW": "津巴布韦", "GT": "危地马拉", "DO": "多米尼加",
     "SC": "塞舌尔", "CR": "哥斯达黎加", "IM": "马恩岛", "PA": "巴拿马",
     "MN": "蒙古", "LV": "拉脱维亚", "CY": "塞浦路斯",
+    "LY": "利比亚", "NP": "尼泊尔", "OM": "阿曼", "HU": "匈牙利",
 }
 COUNTRY_ALIAS = {v: k for k, v in COUNTRY_NAME.items()}
 COUNTRY_ALIAS.update({
@@ -72,6 +73,7 @@ COUNTRY_ALIAS.update({
     "SAUDI ARABIA": "SA", "NIGERIA": "NG", "NORWAY": "NO",
     "NEW ZEALAND": "NZ", "SWITZERLAND": "CH", "BELGIUM": "BE",
     "CZECHIA": "CZ", "CROATIA": "HR",
+    "NEPAL": "NP", "LIBYA": "LY", "OMAN": "OM", "HUNGARY": "HU",
 })
 
 def normalize_country(country):
