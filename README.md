@@ -4,30 +4,38 @@
 [![Python](https://img.shields.io/badge/Python-3.13-blue)](https://python.org)
 [![Redis](https://img.shields.io/badge/Redis-7-red)](https://redis.io)
 
-基于 [jhao104/proxy_pool](https://github.com/jhao104/proxy_pool) 的自定义 **评分/路由/面板一体化** 增强版。在原有采集+校验基础上，追加信用评分、粘性会话、站点隔离、源质关闸等生产级功能。
+基于代理采集引擎的自定义 **评分/路由/面板一体化** 管理工具。支持采集过滤、五级评分、离线 IP 地理定位、实时前端筛选，158k+ 代理池规模。
 
-## ✨ 相比原版的新增
+## ✨ 核心功能
 
-| 功能 | 原版 | Dashboard v2 |
-|------|:--:|:--:|
-| 采集源 | 15 | **69**（15 + 35 GitHub + 19 直爬） |
-| 代理评分 | ❌ | ✅ S/A/B/C 四级信用评分 |
-| 粘性会话 | ❌ | ✅ 同目标站点复用同一代理 |
-| 站点隔离 | ❌ | ✅ 按目标站分组代理质量 |
-| 源质关闸 | ❌ | ✅ 低质源自动屏蔽 |
-| 面板筛选 | 简陋 | ✅ 实时过滤/排序/搜索+GeoIP |
-| HTTP/SOCKS5转发 | ❌ | ✅ 内置 :8080 / :1080 代理 |
+| 功能 | 说明 |
+|------|------|
+| 采集源 | **35** 源（20 GitHub + 15 爬虫/API），采集阶段过滤缺端口/协议的死数据 |
+| 五级评分 | **S/A/B/C/D**，基于延迟：S<500ms / A<1s / B<3s / C<5s / D≥5s 或失败 |
+| 离线 GeoIP | **DB-IP Country Lite** 二进制库（355K 条，3.5MB），3.6μs/查，零 API 限流 |
+| 粘性会话 | 同目标站点复用同一代理，支持 X-Proxy-Session |
+| 站点隔离 | 按目标站分组代理质量评分 |
+| 源质关闸 | 低质源自动屏蔽（S+A+B 率 <30% 即隔离） |
+| 前端筛选 | 实时按国家/城市/协议/延迟/评级筛选，窗口分页，SPA 响应式 |
+| 代理网关 | 内置 HTTP :8080 / SOCKS5 :1080 转发 |
 
 ## 🏗 架构
 
 ```
-jhao104/proxy_pool (15源) ──┐
-new_fetcher.py (19源)  ─────┼──→ Redis ──→ backend:5051 ──→ frontend:5050
-import_github_proxies (35源)┘                    │
-                                          ┌──────┴──────┐
-                                          │  validator   │ 后台校验
-                                          └─────────────┘
+采集引擎（35源）──→ Redis ──→ backend:5051 ──→ frontend:5050
+                     │              │
+                proxy:ip:port   geo.py (离线IP库 + 在线API fallback)
+                     │              │
+                validator     data/ipdb.bin (355K条)
 ```
+
+| 组件 | 端口 | 说明 |
+|------|------|------|
+| `proxy-redis` | 6379 | ZSET 信用分 + Hash 元数据 |
+| `backend.py` | 5051 | 纯 API + 多线程服务 |
+| `frontend.py` | 5050 | 静态文件 + /api 反代 |
+| `validator.py` | — | 后台验证引擎，30s 一轮 |
+| `geo.py` | — | GeoIP：离线 DB-IP → Redis 缓存 → ip-api/ip9/freeipapi/ipwhois |
 
 ## 📦 快速开始
 
@@ -50,8 +58,10 @@ docker-compose up -d
 
 | 参数 | 说明 |
 |------|------|
-| `grade` | `s`/`a`/`b`/`c` |
+| `grade` | `s`/`a`/`b`/`c`/`d` |
 | `country` | `CN`中国 / `!CN`海外 |
+| `region` | 城市/地区关键词匹配 |
+| `location` | 同 region，别名 |
 | `protocol` | `http`/`https`/`socks4`/`socks5` |
 | `delay` | 延迟上限ms，如 `delay=1000` |
 | `search` | IP模糊搜索 |
@@ -60,12 +70,12 @@ docker-compose up -d
 
 ```json
 {
-  "total": 8234, "filtered": 156,
+  "total": 35200, "filtered": 156,
   "proxies": [{
     "ip": "123.45.67.89", "port": "8080",
     "protocol": "http", "delay": 234, "grade": "s",
     "region": "CN", "location": "浙江 杭州",
-    "source": "kuaidaili"
+    "source": "github-xxx"
   }]
 }
 ```
@@ -73,68 +83,59 @@ docker-compose up -d
 ### GET `/api/stats`
 
 ```json
-{"total":8234, "grades":{"s":1200,"a":2800,"b":3200,"c":1034}, "china":3400}
+{"total":35200, "grades":{"s":1200,"a":2800,"b":3200,"c":10000,"d":18000}, "china":3400, "regions":{"CN":28000, "US":1200, …}}
 ```
 
 ## 🎯 评分机制
 
-| 事件 | 分数 |
-|------|:--:|
-| 新增 | 20 |
-| 校验通过 | +5 |
-| 403 | -20 |
-| 502 | -30 |
-| 超时 | -30 |
-| 上限 | 100 |
-| 归零 | 移入黑名单 |
-
-## 📊 采集源
-
-### new_fetcher.py (19源)
-
-| 分类 | 源 |
-|------|------|
-| 直爬API | ProxyScrape, docip, 89ip, OpenProxyList |
-| GitHub | MuRongPIG, VMHeaven, jetkai, proxifly-gh, clarketm, Thordata, hookzof |
-| HTML表格 | Free-Proxy-List, SSLProxies, US-Proxy, Socks-Proxy |
-| 国内 | 快代理, ip3366, 积流, 齐云 |
-
-### import_github_proxies.py (13仓库 / 35 raw list)
-
-| 仓库 | ⭐ | 更新频率 |
-|------|:--:|------|
-| TheSpeedX/PROXY-List | 5647 | 每日 |
-| monosans/proxy-list | 1431 | 带地理位置 |
-| hookzof/socks5_list | 999 | Telegram 代理 |
-| roosterkid/openproxylist | 862 | 每小时 |
-| jetkai/proxy-list | 645 | 自动更新 |
-| sunny9577/proxy-scraper | 584 | 每 3 小时 |
-| ShiftyTR/Proxy-List | 579 | 每小时 |
-| mmpx12/proxy-list | 432 | 免费代理 |
-| vakhov/fresh-proxy-list | 356 | 新鲜代理 |
-| ALIILAPRO/Proxy | 187 | 每小时 |
-| themiralay/Proxy-List-World | 166 | ICE 代理采集 |
-| rdavydov/proxy-list | 113 | 每 30 分钟 |
-| mertguvencli/http-proxy-list | — | HTTP 代理 |
-
-> 完整列表见 [proxy-pool-tools](https://github.com/abclq/proxy-pool-tools)
-
-## 📁 文件
-
 ```
-├── dashboard.py        # 启动器
-├── frontend.py         # :5050 Web面板
-├── backend.py          # :5051 API
-├── geo.py              # GeoIP
-├── validator.py        # 校验
-├── new_fetcher.py      # 19源采集
-├── ip2region.xdb       # IP地域库
-├── static/             # 前端
-└── Dockerfile
+S 级:  <500ms   (延迟极低)
+A 级:  <1s      (优秀)
+B 级:  <3s      (良好)
+C 级:  <5s      (一般)
+D 级:  ≥5s 或验证失败 (差)
 ```
 
-## 🙏 参考
+信用分系统：新代理 +20，验证通过 +5，请求成功 +5（上限 100），连接失败 -30（进黑名单 5min），验证失败 -15，分数 ≤0 自动清理。
 
-- [jhao104/proxy_pool](https://github.com/jhao104/proxy_pool) — 原版（23.4k⭐）
-- [ip2region](https://github.com/lionsoul2014/ip2region)
-- [abclq/proxy-pool-tools](https://github.com/abclq/proxy-pool-tools) — 增强工具
+## 🗺 GeoIP 管线
+
+1. **离线 DB-IP**（内存二分查找，3.6μs）—— 355K 条 IP 段，355 个国家/地区覆盖
+2. **Redis 缓存**（30 天 TTL）—— 在线 API 结果缓存
+3. **ip-api.com**（免费，150/min）—— 主力在线 API
+4. **ip9.com.cn** / **freeipapi.com** / **ipwhois.app**（备用 fallback）
+5. **代理轮换**：在线 API 遇 403/429 时从 Redis 代理池取 HTTP 代理轮换
+
+后台线程每月自动更新离线库。
+
+## 📂 代码结构
+
+```
+proxy-pool-dashboard/
+├── backend.py          # API 服务 + 数据加载 + 缓存
+├── frontend.py         # 静态文件服务 + 反代
+├── geo.py              # GeoIP 解析（离线 + 在线 fallback）
+├── validator.py        # 后台验证引擎（TCP + HTTP 两阶段）
+├── new_fetcher.py      # 采集引擎（35 源并发拉取）
+├── dashboard.py        # PID 1 看门狗（进程管理 + 崩溃重启）
+├── data/
+│   └── ipdb.bin        # 离线 IP 二进制库（355K 条）
+├── static/
+│   ├── index.html      # SPA 入口
+│   ├── app.js          # 前端逻辑（SPA 视图 + 筛选 + 分页）
+│   └── style.css       # GitHub 暗色主题
+├── docker-compose.yml
+├── Dockerfile
+└── requirements.txt
+```
+
+## 🔧 技术要点
+
+- **前后端筛选统一走后端**：region/protocol/search/speed 全通过 API 参数传给后端
+- **AbortController 防竞态**：快速切换筛选时取消旧请求
+- **窗口分页**：10k+ 代理时最多显示 7 个页码按钮
+- **事件委托复制**：点击复制按钮不触发内联 onclick，走事件委托 + data 属性
+- **XSS 防护**：所有 innerHTML 注入点经过 escapeHtml()
+- **5s 缓存 TTL**：all_proxies() 返回带缓存，避免每次 150k 次 hgetall
+- **多线程 HTTP 服务**：ThreadingHTTPServer，避免单请求阻塞全服务
+- **启动预热**：启动时同步建缓存，首个用户不需等 30s
