@@ -144,13 +144,19 @@ function renderTable(proxies){
   const gradeLabel={s:'S',a:'A',b:'B',c:'C'};
   let html='';
   for(const p of proxies){
+    let regionDisp=COUNTRY_NAME[p.region]||p.region||'?';
+    if(p.region==='CN'&&p.location&&p.location!=='?'){
+      regionDisp=COUNTRY_NAME.CN+'·'+p.location;
+    }else if(p.location&&p.location!=='?'){
+      regionDisp=COUNTRY_NAME[p.region]||p.location||p.region||'?';
+    }
     html+='<tr>'+
       `<td>${esc(p.ip)} <button class="copy-btn" data-copy="${escAttr(p.ip+':'+p.port)}" title="复制">📋</button></td>`+
       `<td>${esc(String(p.port))}</td>`+
       `<td>${esc(p.protocol||'?')}</td>`+
       `<td><span class="badge ${escAttr(p.grade||'c')}">${gradeLabel[p.grade]||'?'}</span></td>`+
       `<td>${esc((p.delay||0).toFixed(0))}ms</td>`+
-      `<td>${esc(COUNTRY_NAME[p.region] || p.location || p.region || '?')}</td>`+
+      `<td>${esc(regionDisp)}</td>`+
       `<td>${esc(p.region||'?')}</td>`+
       `<td>${esc(p.source||'?')}</td>`+
       `<td>${esc(p.anon||'?')}</td>`+
