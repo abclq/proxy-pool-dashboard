@@ -7,18 +7,44 @@
 <style>
   :root {--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--accent:#58a6ff;--green:#3fb950;--yellow:#d2991d;--orange:#db6d28;--red:#f85149}
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:16px 20px}
-  h2{font-size:15px;font-weight:600;color:#e6edf3;margin-bottom:12px}
-  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:12px}
-  .card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 12px}
-  .card .v{font-size:22px;font-weight:600;color:#e6edf3}
+  body{background:var(--bg);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:16px 20px;min-height:100vh}
+  h1{font-size:18px;font-weight:600;color:#e6edf3;margin-bottom:4px}
+  .sub{font-size:12px;color:var(--muted);margin-bottom:16px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px;margin-bottom:16px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;text-align:center}
+  .card .v{font-size:24px;font-weight:700;color:#e6edf3}
   .card .l{font-size:11px;color:var(--muted);margin-top:2px}
+  .card.accent{border-color:var(--accent)}
+  .card.green{border-color:var(--green)}
+  .card.yellow{border-color:var(--yellow)}
+  .card.red{border-color:var(--red)}
+
+  /* Country grid */
+  .country-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-bottom:16px}
+  .country-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 14px;cursor:pointer;transition:all .15s;display:flex;align-items:center;gap:10px}
+  .country-card:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.3)}
+  .country-card .flag{font-size:24px;flex-shrink:0}
+  .country-card .info{flex:1;min-width:0}
+  .country-card .name{font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .country-card .count{font-size:18px;font-weight:700;color:var(--accent)}
+  .country-card .code-label{font-size:10px;color:var(--muted)}
+
+  /* Node view */
+  #node-view{display:none}
+  .back-bar{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+  .back-btn{background:none;border:1px solid var(--border);color:var(--accent);border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer;transition:all .15s}
+  .back-btn:hover{background:rgba(88,166,255,.1);border-color:var(--accent)}
+  .country-title{font-size:16px;font-weight:600;color:#e6edf3}
+  .country-title .flag{font-size:20px;margin-right:4px}
+
   .toolbar{display:flex;gap:6px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
   .toolbar select,.toolbar input{background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;outline:none;height:28px}
   .toolbar select:focus,.toolbar input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(88,166,255,.15)}
   .toolbar select{min-width:70px}
   .toolbar input[type=number]{width:70px}
   .toolbar input[type=text]{width:120px}
+  .toolbar label{font-size:11px;color:var(--muted)}
+
   table{width:100%;border-collapse:collapse;font-size:12px}
   thead{position:sticky;top:0;z-index:1}
   th{background:var(--surface);border-bottom:1px solid var(--border);padding:6px 8px;text-align:left;font-weight:600;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
@@ -33,37 +59,61 @@
   .badge.s{background:rgba(63,185,80,.15);color:var(--green)}
   .badge.a{background:rgba(210,153,29,.15);color:var(--yellow)}
   .badge.b{background:rgba(219,109,40,.15);color:var(--orange)}
-  .badge.c{background:rgba(240,136,62,.15);color:var(--orange)}
+  .badge.c{background:rgba(240,136,62,.15);color:#f0883e}
   .badge.d{background:rgba(248,81,73,.15);color:var(--red)}
   .copy-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:1px 6px;font-size:10px;cursor:pointer}
   .copy-btn:hover{color:var(--text);border-color:var(--accent)}
   .pagination{display:flex;gap:4px;align-items:center;margin-top:12px;font-size:12px;color:var(--muted)}
-  .pagination a{color:var(--accent);text-decoration:none;padding:2px 6px;border-radius:4px}
-  .pagination a:hover{background:rgba(88,166,255,.1)}
-  .pagination .cur{background:var(--accent);color:#fff;border-radius:4px;padding:2px 6px}
+  .pagination a,.pagination button{background:var(--surface);color:var(--accent);text-decoration:none;border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:12px;cursor:pointer}
+  .pagination a:hover,.pagination button:hover{background:rgba(88,166,255,.1);border-color:var(--accent)}
+  .pagination .cur{background:var(--accent);color:#fff;border-radius:4px;padding:3px 8px;border:1px solid var(--accent)}
+  .pagination .info{font-size:11px;color:var(--muted);margin-left:8px}
   tbody.loading{opacity:.4}
   #toast{position:fixed;bottom:20px;right:20px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 14px;font-size:12px;color:var(--text);opacity:0;transition:opacity .15s;z-index:999}
   #toast.show{opacity:1}
-  .country-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:6px;margin-bottom:12px}
-  .country-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 10px;cursor:pointer;transition:border-color .15s,background .15s}
-  .country-card:hover{border-color:var(--accent);background:rgba(88,166,255,.06)}
-  .country-card .cn{font-size:12px;color:var(--text)}
-  .country-card .cc{font-size:18px;font-weight:600;color:var(--accent)}
+  .loading-spinner{text-align:center;padding:20px;color:var(--muted)}
+  #node-count{font-size:12px;color:var(--muted);margin-left:4px}
+
+  @media (max-width:600px){
+    body{padding:8px 10px}
+    .country-grid{grid-template-columns:repeat(auto-fill,minmax(110px,1fr))}
+  }
 </style>
 </head>
 <body>
-  <h2>Proxy Pool Dashboard</h2>
-  <div class="cards">
-    <div class="card"><div class="v" id="v-total">-</div><div class="l">Total</div></div>
-    <div class="card"><div class="v" id="v-s">-</div><div class="l">S &lt;500ms</div></div>
-    <div class="card"><div class="v" id="v-a">-</div><div class="l">A &lt;1s</div></div>
-    <div class="card"><div class="v" id="v-b">-</div><div class="l">B &lt;3s</div></div>
-    <div class="card"><div class="v" id="v-c">-</div><div class="l">C 3-5s</div></div>
-    <div class="card"><div class="v" id="v-d">-</div><div class="l">D ≥5s</div></div>
-    <div class="card"><div class="v" id="v-cn">-</div><div class="l">中国</div></div>
+
+<!-- Country Overview -->
+<div id="country-view">
+  <h1>🌐 Proxy Pool</h1>
+  <div class="sub" id="header-sub">加载中…</div>
+  <div class="cards" id="stats-cards">
+    <div class="card"><div class="v" id="v-total">-</div><div class="l">总计</div></div>
+    <div class="card green"><div class="v" id="v-s">-</div><div class="l">S (&lt;500ms)</div></div>
+    <div class="card yellow"><div class="v" id="v-a">-</div><div class="l">A (&lt;1s)</div></div>
+    <div class="card red"><div class="v" id="v-d">-</div><div class="l">D (≥5s / 死)</div></div>
+  </div>
+  <h2 style="font-size:13px;font-weight:600;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">按国家浏览</h2>
+  <div id="country-grid" class="country-grid">
+    <div class="loading-spinner">加载国家数据…</div>
+  </div>
+</div>
+
+<!-- Node Detail View -->
+<div id="node-view">
+  <div class="back-bar">
+    <button class="back-btn" onclick="showCountryView()">← 返回</button>
+    <span class="country-title"><span id="node-flag"></span> <span id="node-name"></span></span>
+    <span id="node-count"></span>
   </div>
   <div class="toolbar">
-    <select name="grade">
+    <select id="f-protocol">
+      <option value="">全部协议</option>
+      <option value="http">HTTP</option>
+      <option value="https">HTTPS</option>
+      <option value="socks4">SOCKS4</option>
+      <option value="socks5">SOCKS5</option>
+    </select>
+    <select id="f-grade">
       <option value="">全部评级</option>
       <option value="s">S &lt;500ms</option>
       <option value="a">A &lt;1s</option>
@@ -71,41 +121,28 @@
       <option value="c">C 3-5s</option>
       <option value="d">D ≥5s</option>
     </select>
-    <select name="country">
-      <option value="">全部地区</option>
-      <option value="!CN">海外</option>
-    </select>
-    <select name="protocol">
-      <option value="">全部协议</option>
-    </select>
-    <input type="number" name="delay" placeholder="延迟上限 ms" min="0" step="100">
-    <input type="text" name="location" placeholder="城市/省份…">
-    <input type="text" name="search" placeholder="搜索 IP…">
-    <button id="btn-query" type="button" onclick="STATE.page=1;loadData()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:4px 14px;font-size:12px;cursor:pointer;height:28px">查询</button>
-  </div>
-  <div id="country-grid" class="country-grid"></div>
-  <div id="table-area" style="display:none">
-  <div class="toolbar" style="margin-bottom:6px">
-    <a href="#" id="btn-back" style="color:var(--accent);font-size:12px;text-decoration:none" onclick="showCountryGrid();return false">← 返回国家列表</a>
+    <input type="text" id="f-location" placeholder="城市筛选…">
+    <input type="number" id="f-delay" placeholder="延迟上限ms" min="0" step="100">
+    <input type="text" id="f-search" placeholder="搜索 IP…">
+    <label><input type="checkbox" id="f-cn-remove" style="vertical-align:middle"> 排除中国D级</label>
+    <button onclick="reloadNodes()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:4px 14px;font-size:12px;cursor:pointer;height:28px">查询</button>
   </div>
   <table>
     <thead><tr>
       <th>IP</th>
-      <th data-sort="port" class="sortable">端口</th>
-      <th data-sort="protocol" class="sortable">协议</th>
-      <th data-sort="grade" class="sortable">评级</th>
       <th data-sort="delay" class="sortable">延迟</th>
-      <th data-sort="location" class="sortable">地区</th>
-      <th data-sort="region" class="sortable">代码</th>
+      <th data-sort="grade" class="sortable">评级</th>
+      <th data-sort="protocol" class="sortable">协议</th>
+      <th data-sort="location" class="sortable">城市</th>
       <th data-sort="source" class="sortable">来源</th>
-      <th data-sort="anon" class="sortable">匿名</th>
       <th data-sort="last_check" class="sortable">检测</th>
     </tr></thead>
-    <tbody><tr><td colspan="10" class="empty">选择筛选条件后点击<code>查询</code>加载数据</td></tr></tbody>
+    <tbody><tr><td colspan="7" class="empty">点击国家卡片查看节点</td></tr></tbody>
   </table>
   <div id="pagination" class="pagination"></div>
-  </div>
-  <div id="toast"></div>
-  <script src="/app.js?v=11"></script>
+</div>
+
+<div id="toast"></div>
+<script src="/app.js?v=12"></script>
 </body>
 </html>

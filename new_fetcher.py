@@ -53,9 +53,9 @@ def geo_lookup(ip):
         pass
     return "unknown|unknown|unknown", False
 
-def add_proxy(proxy_str, source, protocol="http"):
+def add_proxy(proxy_str, source, protocol="?"):
     """添加代理到 Redis，原子写入防幽灵残留。
-    缺端口/协议/端口非法的代理直接丢弃。"""
+    缺端口/协议非法的代理直接丢弃。protocol="?" 由验证器自动探测。"""
     if REDIS.zscore(KEY_POOL, proxy_str) is not None:
         return False  # 已存在
 
@@ -70,8 +70,8 @@ def add_proxy(proxy_str, source, protocol="http"):
             return False
     except (ValueError, TypeError):
         return False
-    # 协议必须是显式值，默认 "http" 仅当调用方明确传入
-    if not protocol or protocol.lower() in ("unknown", "?", ""):
+    # 协议：显式传入才接受，不传默认 "?"（验证器自动探测纠正）
+    if not protocol or protocol.lower() in ("unknown", ""):
         return False
 
     geo_str, is_cn = geo_lookup(ip)
@@ -174,7 +174,7 @@ def fetch_proxyscrape():
     for line in text.strip().split("\n"):
         line = line.strip()
         if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+$', line):
-            if add_proxy(line, "proxyscrape"):
+            if add_proxy(line, "proxyscrape", protocol="http"):
                 count += 1
     return count
 
@@ -218,7 +218,7 @@ def fetch_kuaidaili():
             break
         ips = re.findall(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})</td>\s*<td[^>]*>(\d+)</td>', html)
         for ip, port in ips:
-            if add_proxy(f"{ip}:{port}", "kuaidaili"):
+            if add_proxy(f"{ip}:{port}", "kuaidaili", protocol="http"):
                 count += 1
         time.sleep(1)
     return count
@@ -319,7 +319,7 @@ def fetch_proxifly_gh():
         text = fetch('https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt')
         if text:
             for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
-                if add_proxy(f'{m.group(1)}:{m.group(2)}', 'proxifly-gh'):
+                if add_proxy(f'{m.group(1)}:{m.group(2)}', 'proxifly-gh', protocol="http"):
                     count += 1
     except Exception:
         pass

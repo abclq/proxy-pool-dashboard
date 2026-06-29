@@ -359,6 +359,36 @@ class H(BaseHTTPRequestHandler):
                         _stats_cache["d"] = cached; _stats_cache["t"] = now
             self._json(cached)
             return
+        if path == "/api/countries":
+            countries = {}
+            if index_ready():
+                try:
+                    region_keys = list(r1.scan_iter("idx:country:*", count=200))
+                    if region_keys:
+                        pipe = r1.pipeline(transaction=False)
+                        for k in region_keys: pipe.scard(k)
+                        for k, v in zip(region_keys, pipe.execute()):
+                            code = k.split(":", 2)[2]
+                            countries[code] = v
+                except Exception:
+                    countries = {}
+            if not countries:
+                total = r1.zcard("proxies:pool")
+                batch = 5000
+                for off in range(0, total, batch):
+                    members = r1.zrange("proxies:pool", off, min(total - 1, off + batch - 1))
+                    pipe = r1.pipeline(transaction=False)
+                    for m in members: pipe.hgetall(f"proxy:{m}")
+                    for m, hd in zip(members, pipe.execute()):
+                        if not parse_member(m)[0]: continue
+                        cc = normalize_country(((hd or {}).get("country") or (hd or {}).get("region") or "").strip()) or "?"
+                        countries[cc] = countries.get(cc, 0) + 1
+            result = []
+            for code, count in sorted(countries.items(), key=lambda x: -x[1]):
+                name = COUNTRY_NAME.get(code, code)
+                result.append({"code": code, "name": name, "count": count, "is_china": code == "CN"})
+            self._json({"countries": result, "total_countries": len(result)})
+            return
         self._json({"error":"not found"}, 404)
 
 if __name__ == "__main__":
