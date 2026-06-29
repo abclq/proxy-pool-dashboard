@@ -146,9 +146,10 @@ def build_proxy(member, hd, jm):
     proto = (hd.get("protocol") or "").lower().strip()
     if not proto or proto == "unknown": proto = "https" if jd.get("https") else "?"
     if proto == "?":
-        if port in (80, 8080, 8000, 8888): proto = "http"
-        elif port in (443, 8443): proto = "https"
-        elif port in (1080, 1081, 4145): proto = "socks5"
+        port_str = str(port)
+        if port_str in ("80", "8080", "8000", "8888"): proto = "http"
+        elif port_str in ("443", "8443"): proto = "https"
+        elif port_str in ("1080", "1081", "4145"): proto = "socks5"
     return {"ip": ip, "port": port, "protocol": proto, "delay": delay,
             "grade": grade_for_delay(delay), "region": normalize_country(country), "location": location,
             "source": hd.get("source") or jd.get("source", "?"),
@@ -318,8 +319,16 @@ class H(BaseHTTPRequestHandler):
                     if index_ready():
                         try:
                             grades = {g: r1.scard(idx_key("grade", g)) for g in ("s", "a", "b", "c")}
-                            protos = {k.split(":", 2)[2]: r1.scard(k) for k in r1.scan_iter("idx:proto:*")}
-                            regions = {k.split(":", 2)[2]: r1.scard(k) for k in r1.scan_iter("idx:country:*")}
+                            known_protos = ["http", "https", "socks4", "socks5"]
+                            protos = {k: r1.scard(idx_key("proto", k)) for k in known_protos}
+                            protos = {k: v for k, v in protos.items() if v > 0}
+                            region_keys = list(r1.scan_iter("idx:country:*", count=100))
+                            regions = {}
+                            if region_keys:
+                                pipe = r1.pipeline(transaction=False)
+                                for k in region_keys: pipe.scard(k)
+                                for k, v in zip(region_keys, pipe.execute()):
+                                    regions[k.split(":", 2)[2]] = v
                             china = regions.get("CN", 0)
                             cached = {"total": total, "sample": total, "grades": grades, "protocols": protos,
                                       "china": china, "regions": dict(sorted(regions.items(), key=lambda x: -x[1])[:80]),
