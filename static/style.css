@@ -218,14 +218,15 @@ tbody tr:hover { background: var(--bg-hover); }
 .src { color: var(--text-tertiary); font-size: .6875rem; }
 
 /* Grade badges */
-.grade-s, .grade-a, .grade-b, .grade-c {
+.grade-s, .grade-a, .grade-b, .grade-c, .grade-d {
   font-weight: 700;
   font-size: .75rem;
 }
 .grade-s { color: var(--color-success); }
 .grade-a { color: #56d364; }
 .grade-b { color: var(--color-warning); }
-.grade-c { color: var(--color-danger); }
+.grade-c { color: #f0883e; }
+.grade-d { color: var(--color-danger); }
 
 /* Protocol badges */
 .proto-https { color: var(--color-info); font-weight: 600; }

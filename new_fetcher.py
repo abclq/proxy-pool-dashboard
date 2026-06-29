@@ -41,7 +41,8 @@ def geo_lookup(ip):
     return "unknown|unknown|unknown", False
 
 def add_proxy(proxy_str, source, protocol="http"):
-    """添加代理到 Redis，原子写入防幽灵残留"""
+    """添加代理到 Redis，原子写入防幽灵残留。
+    缺端口/协议/端口非法的代理直接丢弃。"""
     if REDIS.zscore(KEY_POOL, proxy_str) is not None:
         return False  # 已存在
 
@@ -49,6 +50,16 @@ def add_proxy(proxy_str, source, protocol="http"):
     if len(parts) != 2:
         return False
     ip, port = parts[0], parts[1]
+    # 端口必须是合法数字 > 0
+    try:
+        pnum = int(port)
+        if pnum <= 0 or pnum > 65535:
+            return False
+    except (ValueError, TypeError):
+        return False
+    # 协议必须是显式值，默认 "http" 仅当调用方明确传入
+    if not protocol or protocol.lower() in ("unknown", "?", ""):
+        return False
 
     geo_str, is_cn = geo_lookup(ip)
     geo_parts = geo_str.split("|")

@@ -140,10 +140,20 @@ def socks5_test(ip, port):
     return None
 
 def grade_for_latency(ms):
+    if ms <= 0: return "D"
     if ms < 500: return "S"
     if ms < 1000: return "A"
     if ms < 3000: return "B"
-    return "C"
+    if ms < 5000: return "C"
+    return "D"
+
+def grade_for_delay(delay):
+    if delay <= 0: return "d"
+    if delay < 500: return "s"
+    if delay < 1000: return "a"
+    if delay < 3000: return "b"
+    if delay < 5000: return "c"
+    return "d"
 
 # ── 采集新代理 ──
 def harvest_new_proxies():

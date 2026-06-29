@@ -1,5 +1,5 @@
 1|// Proxy Pool Dashboard — v11
-2|const STATE = {page:1, pages:1, perPage:50, sort:'delay', asc:true, filters:{grade:'',country:'',protocol:'',delay:'',search:''}};
+2|const STATE = {page:1, pages:1, perPage:50, sort:'delay', asc:true, filters:{grade:'',country:'',protocol:'',delay:'',location:'',search:''}};
 3|let statsCache = null;
 4|const MAX_PAGE = 7;
 5|
@@ -36,6 +36,7 @@
 36|  document.getElementById('v-a').textContent=(grades.a||0).toLocaleString();
 37|  document.getElementById('v-b').textContent=(grades.b||0).toLocaleString();
 38|  document.getElementById('v-c').textContent=(grades.c||0).toLocaleString();
+38|  document.getElementById('v-d').textContent=(grades.d||0).toLocaleString();
 39|  document.getElementById('v-cn').textContent=(china||0).toLocaleString();
 40|}
 41|
@@ -92,6 +93,7 @@
 92|  STATE.filters.country=document.querySelector('[name=country]')?.value||'';
 93|  STATE.filters.protocol=document.querySelector('[name=protocol]')?.value||'';
 94|  STATE.filters.delay=document.querySelector('[name=delay]')?.value||'';
+94|  STATE.filters.location=(document.querySelector('[name=location]')?.value||'').trim().toLowerCase();
 95|  STATE.filters.search=(document.querySelector('[name=search]')?.value||'').trim().toLowerCase();
 96|}
 97|
@@ -101,6 +103,7 @@
 101|  if(STATE.filters.country)p.set('country',STATE.filters.country);
 102|  if(STATE.filters.protocol)p.set('protocol',STATE.filters.protocol);
 103|  if(STATE.filters.delay)p.set('delay',STATE.filters.delay);
+if(STATE.filters.location)p.set('location',STATE.filters.location);
 104|  if(STATE.filters.search)p.set('search',STATE.filters.search);
 105|  p.set('sort',STATE.sort);
 106|  p.set('asc',STATE.asc?'1':'0');
@@ -168,7 +171,7 @@
 168|function renderTable(proxies){
 169|  const tbody=document.querySelector('tbody');
 170|  if(!proxies.length){tbody.innerHTML='<tr><td colspan="10">无数据</td></tr>';return;}
-171|  const gradeLabel={s:'S',a:'A',b:'B',c:'C'};
+171|  const gradeLabel={s:'S',a:'A',b:'B',c:'C',d:'D'};
 172|  let html='';
 173|  for(const p of proxies){
 174|    let regionDisp=v(COUNTRY_NAME[p.region]||p.region);

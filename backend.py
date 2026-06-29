@@ -113,11 +113,12 @@ def safe_float(v, default=0.0):
         return default
 
 def grade_for_delay(delay):
-    if delay <= 0: return "c"
+    if delay <= 0: return "d"
     if delay < 500: return "s"
     if delay < 1000: return "a"
     if delay < 3000: return "b"
-    return "c"
+    if delay < 5000: return "c"
+    return "d"
 
 def geo_from_hash_or_cache(ip, hd):
     country = (hd.get("country") or hd.get("region") or "").strip()
@@ -296,7 +297,7 @@ class H(BaseHTTPRequestHandler):
             else: total, proxies = fetch_page(page, limit); filtered = total
             sort_by = q.get("sort", [""])[0]; sort_asc = q.get("asc", ["1"])[0] != "0"
             if sort_by == "delay": proxies = sorted(proxies, key=lambda x: x.get("delay") or 999999, reverse=not sort_asc)
-            elif sort_by == "grade": proxies = sorted(proxies, key=lambda x: {"s":0,"a":1,"b":2,"c":3}.get(x.get("grade","c"),3), reverse=not sort_asc)
+            elif sort_by == "grade": proxies = sorted(proxies, key=lambda x: {"s":0,"a":1,"b":2,"c":3,"d":4}.get(x.get("grade","d"),4), reverse=not sort_asc)
             body = {"total": total, "filtered": filtered, "page": page, "pages": max(1, -(-filtered // limit)), "limit": limit, "proxies": proxies, "index_ready": index_ready()}
             b = json.dumps(body, ensure_ascii=False).encode(); etag = hashlib.md5(b).hexdigest()
             if self.headers.get("If-None-Match") == etag: self.send_response(304); self.end_headers(); return
@@ -313,7 +314,7 @@ class H(BaseHTTPRequestHandler):
                 if cached is None or cached.get("total") != total:
                     if index_ready():
                         try:
-                            grades = {g: r1.scard(idx_key("grade", g)) for g in ("s", "a", "b", "c")}
+                            grades = {g: r1.scard(idx_key("grade", g)) for g in ("s", "a", "b", "c", "d")}
                             known_protos = ["http", "https", "socks4", "socks5"]
                             protos = {k: r1.scard(idx_key("proto", k)) for k in known_protos}
                             protos = {k: v for k, v in protos.items() if v > 0}
@@ -333,7 +334,7 @@ class H(BaseHTTPRequestHandler):
                             pass
                     if cached is None:
                         ensure_index_async()
-                        grades = {"s":0,"a":0,"b":0,"c":0}; protos = {}; regions = {}; china = 0; seen = 0
+                        grades = {"s":0,"a":0,"b":0,"c":0,"d":0}; protos = {}; regions = {}; china = 0; seen = 0
                         batch = 5000
                         for off in range(0, total, batch):
                             members = r1.zrange("proxies:pool", off, min(total - 1, off + batch - 1))
