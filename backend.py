@@ -147,9 +147,10 @@ def build_proxy(member, hd, jm):
     if not proto or proto == "unknown": proto = "https" if jd.get("https") else "?"
     if proto == "?":
         port_str = str(port)
-        if port_str in ("80", "8080", "8000", "8888"): proto = "http"
-        elif port_str in ("443", "8443"): proto = "https"
-        elif port_str in ("1080", "1081", "4145"): proto = "socks5"
+        if port_str in ("80","8080","8000","8888","3128","8081","9090","8118","8880","9999","3127"): proto = "http"
+        elif port_str in ("443","8443"): proto = "https"
+        elif port_str in ("1080","1081","4145","2080"): proto = "socks5"
+        elif port_str in ("1088","1089"): proto = "socks4"
     return {"ip": ip, "port": port, "protocol": proto, "delay": delay,
             "grade": grade_for_delay(delay), "region": normalize_country(country), "location": location,
             "source": hd.get("source") or jd.get("source", "?"),
