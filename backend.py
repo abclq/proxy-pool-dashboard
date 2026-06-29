@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """backend — pure API, port 5051. Redis-backed proxy listing with lightweight indexes."""
 import json, os, time, urllib.parse, hashlib, threading
+from functools import lru_cache
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 import redis, sys
@@ -103,9 +104,14 @@ def geo_from_hash_or_cache(ip, hd):
             location = COUNTRY_NAME.get(country, country)
         return country, location
     try:
-        return geo.resolve_region(ip) or "?", geo.resolve(ip) or "?"
+        cr, lo = geo_cached(ip)
+        return cr or "?", lo or "?"
     except Exception:
         return "?", "?"
+
+@lru_cache(maxsize=50000)
+def geo_cached(ip):
+    return geo.resolve_region(ip), geo.resolve(ip)
 
 def build_proxy(member, hd, jm):
     ip, port = parse_member(member)
@@ -264,7 +270,7 @@ class H(BaseHTTPRequestHandler):
             has_filter = any(v not in ("", None) for v in filters.values())
             if has_filter: total, filtered, proxies = fetch_filtered(page, limit, filters)
             else: total, proxies = fetch_page(page, limit); filtered = total
-            sort_by = q.get("sort", [""])[0]; sort_asc = q.get("order", ["asc"])[0] != "desc"
+            sort_by = q.get("sort", [""])[0]; sort_asc = q.get("asc", ["1"])[0] != "0"
             if sort_by == "delay": proxies = sorted(proxies, key=lambda x: x.get("delay") or 999999, reverse=not sort_asc)
             elif sort_by == "grade": proxies = sorted(proxies, key=lambda x: {"s":0,"a":1,"b":2,"c":3}.get(x.get("grade","c"),3), reverse=not sort_asc)
             body = {"total": total, "filtered": filtered, "page": page, "pages": max(1, -(-filtered // limit)), "limit": limit, "proxies": proxies, "index_ready": index_ready()}

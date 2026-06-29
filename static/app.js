@@ -95,15 +95,16 @@ async function loadData(){
 }
 
 function buildProtocolDropdown(country){
+  if(window._protoAbort)window._protoAbort.abort();
+  window._protoAbort=new AbortController();
   const sel=document.querySelector('[name=protocol]');
   if(!sel||!statsCache)return;
   const prev=sel.value;
   while(sel.options.length>1)sel.remove(1);
-  const allProtos=Object.entries(statsCache.protocols).sort((a,b)=>b[1]-a[1]);
   let protoSet=new Set(['http','https','socks4','socks5']);
   if(country){
     const q=new URLSearchParams({country:country,limit:'200'});
-    api('/api/proxies?'+q.toString()).then(r=>{
+    api('/api/proxies?'+q.toString(),window._protoAbort.signal).then(r=>{
       const protocols=new Set();
       (r.proxies||[]).forEach(p=>protocols.add(p.protocol||'?'));
       protocols.forEach(p=>protoSet.add(p));
@@ -115,7 +116,7 @@ function buildProtocolDropdown(country){
         sel.appendChild(opt);
       });
       sel.value=prev;
-    }).catch(()=>{});
+    }).catch(e=>{if(e.name!=='AbortError')console.error('proto',e);});
   }else{
     allProtos.forEach(([code,count])=>{
       if(code==='?')return;
@@ -219,6 +220,7 @@ window.addEventListener('DOMContentLoaded',()=>{
     readFilters();
     STATE.page=1;
     buildProtocolDropdown(STATE.filters.country);
+    loadData();
   });
   protocolSel?.addEventListener('change',onFilterChange);
   document.querySelectorAll('[name=grade]').forEach(el=>el.addEventListener('change',onFilterChange));
