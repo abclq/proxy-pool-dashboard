@@ -72,6 +72,7 @@
     </select>
     <input type="number" name="delay" placeholder="延迟上限 ms" min="0" step="100">
     <input type="text" name="search" placeholder="搜索 IP…">
+    <button id="btn-query" type="button" onclick="STATE.page=1;loadData()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:4px 14px;font-size:12px;cursor:pointer;height:28px">查询</button>
   </div>
   <table>
     <thead><tr>
@@ -86,7 +87,7 @@
       <th data-sort="anon" class="sortable">匿名</th>
       <th data-sort="last_check" class="sortable">检测</th>
     </tr></thead>
-    <tbody><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
+    <tbody><tr><td colspan="10" class="empty">选择筛选条件后点击<code>查询</code>加载数据</td></tr></tbody>
   </table>
   <div id="pagination" class="pagination"></div>
   <div id="toast"></div>

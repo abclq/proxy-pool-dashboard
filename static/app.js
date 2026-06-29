@@ -1,6 +1,6 @@
 // Proxy Pool Dashboard — v11
 const STATE = {page:1, pages:1, perPage:50, sort:'delay', asc:true, filters:{grade:'',country:'',protocol:'',delay:'',search:''}};
-let statsCache = null, abortCtrl = null;
+let statsCache = null;
 const MAX_PAGE = 7;
 
 const COUNTRY_NAME = {
@@ -82,19 +82,15 @@ async function loadData(){
   const tbody=document.querySelector('tbody');
   tbody.classList.add('loading');
   try{
-    if(abortCtrl)abortCtrl.abort();
-    abortCtrl=new AbortController();
-    const data=await api(buildURL(),abortCtrl.signal);
+    const data=await api(buildURL());
     STATE.pages=data.pages||1;
     STATE.page=data.page||1;
     renderTable(data.proxies||[]);
     renderPagination();
     buildProtocolDropdown(STATE.filters.country);
   }catch(e){
-    if(e.name!=='AbortError'){
-      document.querySelector('tbody').innerHTML='<tr><td colspan="10">加载失败，<a href="#" onclick="loadData();return false">重试</a></td></tr>';
-      document.getElementById('pagination').innerHTML='';
-    }
+    document.querySelector('tbody').innerHTML='<tr><td colspan="10">加载失败，<a href="#" onclick="loadData();return false">重试</a></td></tr>';
+    document.getElementById('pagination').innerHTML='';
   }
   tbody.classList.remove('loading');
 }
@@ -123,13 +119,15 @@ function buildProtocolDropdown(country){
       sel.value=prev;
     }).catch(e=>{if(e.name!=='AbortError')console.error('proto',e);});
   }else{
-    allProtos.forEach(([code,count])=>{
-      if(code==='?')return;
-      const opt=document.createElement('option');
-      opt.value=code;
-      opt.textContent=code==='http'?'HTTP':code==='https'?'HTTPS':code==='socks5'?'SOCKS5':'SOCKS4'+' ('+count+')';
-      sel.appendChild(opt);
-    });
+    if(statsCache?.protocols){
+      Object.entries(statsCache.protocols).forEach(([code,count])=>{
+        if(code==='?')return;
+        const opt=document.createElement('option');
+        opt.value=code;
+        opt.textContent=code==='http'?'HTTP':code==='https'?'HTTPS':code==='socks5'?'SOCKS5':'SOCKS4'+' ('+count+')';
+        sel.appendChild(opt);
+      });
+    }
     sel.value=prev;
   }
 }
@@ -248,7 +246,6 @@ function init(){
   });
   document.querySelectorAll('thead th[data-sort]').forEach(th=>th.addEventListener('click',()=>onSort(th.dataset.sort)));
   document.getElementById('pagination')?.addEventListener('click',onPageClick);
-  document.getElementById('btn-query')?.addEventListener('click',()=>{STATE.page=1;loadData();});
   document.querySelector('tbody')?.addEventListener('click',onCopy);
   document.addEventListener('keydown',onKeydown);
   loadStats();
