@@ -25,7 +25,7 @@ function escAttr(s){if(s==null)return'';return String(s).replace(/&/g,'&amp;').r
 async function api(path,signal){const r=await fetch(path,{signal});if(!r.ok)throw new Error(r.status);return r.json();}
 
 async function loadStats(){
-  try{statsCache=await api('/api/stats');renderStats();buildCountryDropdown();}catch(e){console.error('stats',e);}
+  try{statsCache=await api('/api/stats');renderStats();buildCountryDropdown();renderCountryGrid();}catch(e){console.error('stats',e);}
 }
 
 function renderStats(){
@@ -56,6 +56,37 @@ function buildCountryDropdown(){
   if(prev&&[...sel.options].some(o=>o.value===prev))sel.value=prev;
 }
 
+function renderCountryGrid(){
+  if(!statsCache||!statsCache.regions)return;
+  const grid=document.getElementById('country-grid');
+  if(!grid)return;
+  const entries=Object.entries(statsCache.regions)
+    .filter(([code])=>code&&code!=='?')
+    .sort((a,b)=>b[1]-a[1]);
+  let html='';
+  for(const[code,count]of entries){
+    const name=COUNTRY_NAME[code]||code;
+    html+=`<div class="country-card" onclick="filterCountry('${escAttr(code)}')"><div class="cc">${count.toLocaleString()}</div><div class="cn">${esc(name)}</div></div>`;
+  }
+  grid.innerHTML=html;
+}
+
+function filterCountry(code){
+  const sel=document.querySelector('[name=country]');
+  if(sel)sel.value=code;
+  readFilters();
+  STATE.page=1;
+  loadData();
+}
+
+function showCountryGrid(){
+  document.getElementById('country-grid').style.display='';
+  document.getElementById('table-area').style.display='none';
+  const sel=document.querySelector('[name=country]');
+  if(sel)sel.value='';
+  readFilters();
+}
+
 function readFilters(){
   STATE.filters.grade=document.querySelector('[name=grade]')?.value||'';
   STATE.filters.country=document.querySelector('[name=country]')?.value||'';
@@ -79,6 +110,8 @@ function buildURL(){
 }
 
 async function loadData(){
+  document.getElementById('country-grid').style.display='none';
+  document.getElementById('table-area').style.display='';
   const tbody=document.querySelector('tbody');
   tbody.classList.add('loading');
   try{

@@ -43,6 +43,11 @@
   tbody.loading{opacity:.4}
   #toast{position:fixed;bottom:20px;right:20px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 14px;font-size:12px;color:var(--text);opacity:0;transition:opacity .15s;z-index:999}
   #toast.show{opacity:1}
+  .country-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:6px;margin-bottom:12px}
+  .country-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 10px;cursor:pointer;transition:border-color .15s,background .15s}
+  .country-card:hover{border-color:var(--accent);background:rgba(88,166,255,.06)}
+  .country-card .cn{font-size:12px;color:var(--text)}
+  .country-card .cc{font-size:18px;font-weight:600;color:var(--accent)}
 </style>
 </head>
 <body>
@@ -74,6 +79,11 @@
     <input type="text" name="search" placeholder="搜索 IP…">
     <button id="btn-query" type="button" onclick="STATE.page=1;loadData()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:4px 14px;font-size:12px;cursor:pointer;height:28px">查询</button>
   </div>
+  <div id="country-grid" class="country-grid"></div>
+  <div id="table-area" style="display:none">
+  <div class="toolbar" style="margin-bottom:6px">
+    <a href="#" id="btn-back" style="color:var(--accent);font-size:12px;text-decoration:none" onclick="showCountryGrid();return false">← 返回国家列表</a>
+  </div>
   <table>
     <thead><tr>
       <th>IP</th>
@@ -90,6 +100,7 @@
     <tbody><tr><td colspan="10" class="empty">选择筛选条件后点击<code>查询</code>加载数据</td></tr></tbody>
   </table>
   <div id="pagination" class="pagination"></div>
+  </div>
   <div id="toast"></div>
   <script src="/app.js?v=11"></script>
 </body>
