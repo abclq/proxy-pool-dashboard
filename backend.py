@@ -145,6 +145,10 @@ def build_proxy(member, hd, jm):
     delay = safe_float(hd.get("latency") or hd.get("delay"), 0.0)
     proto = (hd.get("protocol") or "").lower().strip()
     if not proto or proto == "unknown": proto = "https" if jd.get("https") else "?"
+    if proto == "?":
+        if port in (80, 8080, 8000, 8888): proto = "http"
+        elif port in (443, 8443): proto = "https"
+        elif port in (1080, 1081, 4145): proto = "socks5"
     return {"ip": ip, "port": port, "protocol": proto, "delay": delay,
             "grade": grade_for_delay(delay), "region": normalize_country(country), "location": location,
             "source": hd.get("source") or jd.get("source", "?"),
@@ -307,39 +311,45 @@ class H(BaseHTTPRequestHandler):
             except BrokenPipeError: pass
             return
         if path == "/api/stats":
-            total = r1.zcard("proxies:pool"); ensure_index_async(); now = time.time()
+            total = r1.zcard("proxies:pool"); now = time.time()
             with _stats_lock:
                 cached = _stats_cache["d"] if now - _stats_cache["t"] < 30 else None
                 if cached is None or cached.get("total") != total:
-                    grades = {"s":0,"a":0,"b":0,"c":0}; protos = {}; regions = {}; china = 0; seen = 0
-                    batch = 5000
-                    for off in range(0, total, batch):
-                        members = r1.zrange("proxies:pool", off, min(total - 1, off + batch - 1))
-                        pipe = r1.pipeline(transaction=False)
-                        for m in members: pipe.hgetall(f"proxy:{m}")
-                        for m, hd in zip(members, pipe.execute()):
-                            if not parse_member(m)[0]: continue
-                            seen += 1
-                            delay = safe_float((hd or {}).get("latency") or (hd or {}).get("delay"), 0.0)
-                            g = grade_for_delay(delay); grades[g] = grades.get(g, 0) + 1
-                            proto = ((hd or {}).get("protocol") or "?").lower().strip() or "?"
-                            if proto == "unknown": proto = "?"
-                            protos[proto] = protos.get(proto, 0) + 1
-                            country = normalize_country(((hd or {}).get("country") or (hd or {}).get("region") or "").strip()) or "?"
-                            regions[country] = regions.get(country, 0) + 1
-                            if country == "CN": china += 1
                     if index_ready():
                         try:
                             grades = {g: r1.scard(idx_key("grade", g)) for g in ("s", "a", "b", "c")}
                             protos = {k.split(":", 2)[2]: r1.scard(k) for k in r1.scan_iter("idx:proto:*")}
                             regions = {k.split(":", 2)[2]: r1.scard(k) for k in r1.scan_iter("idx:country:*")}
                             china = regions.get("CN", 0)
+                            cached = {"total": total, "sample": total, "grades": grades, "protocols": protos,
+                                      "china": china, "regions": dict(sorted(regions.items(), key=lambda x: -x[1])[:80]),
+                                      "index_ready": True, "stats_cached_at": int(now)}
+                            _stats_cache["d"] = cached; _stats_cache["t"] = now
                         except Exception:
                             pass
-                    cached = {"total": total, "sample": seen, "grades": grades, "protocols": protos,
-                              "china": china, "regions": dict(sorted(regions.items(), key=lambda x: -x[1])[:80]),
-                              "index_ready": index_ready(), "stats_cached_at": int(now)}
-                    _stats_cache["d"] = cached; _stats_cache["t"] = now
+                    if cached is None:
+                        ensure_index_async()
+                        grades = {"s":0,"a":0,"b":0,"c":0}; protos = {}; regions = {}; china = 0; seen = 0
+                        batch = 5000
+                        for off in range(0, total, batch):
+                            members = r1.zrange("proxies:pool", off, min(total - 1, off + batch - 1))
+                            pipe = r1.pipeline(transaction=False)
+                            for m in members: pipe.hgetall(f"proxy:{m}")
+                            for m, hd in zip(members, pipe.execute()):
+                                if not parse_member(m)[0]: continue
+                                seen += 1
+                                delay = safe_float((hd or {}).get("latency") or (hd or {}).get("delay"), 0.0)
+                                g = grade_for_delay(delay); grades[g] = grades.get(g, 0) + 1
+                                proto = ((hd or {}).get("protocol") or "?").lower().strip() or "?"
+                                if proto == "unknown": proto = "?"
+                                protos[proto] = protos.get(proto, 0) + 1
+                                country = normalize_country(((hd or {}).get("country") or (hd or {}).get("region") or "").strip()) or "?"
+                                regions[country] = regions.get(country, 0) + 1
+                                if country == "CN": china += 1
+                        cached = {"total": total, "sample": seen, "grades": grades, "protocols": protos,
+                                  "china": china, "regions": dict(sorted(regions.items(), key=lambda x: -x[1])[:80]),
+                                  "index_ready": index_ready(), "stats_cached_at": int(now)}
+                        _stats_cache["d"] = cached; _stats_cache["t"] = now
             self._json(cached)
             return
         self._json({"error":"not found"}, 404)
