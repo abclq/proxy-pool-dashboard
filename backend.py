@@ -31,6 +31,20 @@ COUNTRY_NAME = {
     "JP": "日本", "KR": "韩国", "SG": "新加坡", "TH": "泰国", "ID": "印尼",
     "IN": "印度", "VN": "越南", "MY": "马来西亚", "PH": "菲律宾", "GB": "英国",
     "DE": "德国", "FR": "法国", "RU": "俄罗斯", "BR": "巴西", "CA": "加拿大",
+    "IT": "意大利", "ES": "西班牙", "NL": "荷兰", "SE": "瑞典", "CH": "瑞士",
+    "AU": "澳大利亚", "NZ": "新西兰", "PK": "巴基斯坦", "BD": "孟加拉国",
+    "UA": "乌克兰", "PL": "波兰", "CZ": "捷克", "AR": "阿根廷", "MX": "墨西哥",
+    "CL": "智利", "ZA": "南非", "EG": "埃及", "NG": "尼日利亚", "KE": "肯尼亚",
+    "SA": "沙特阿拉伯", "AE": "阿联酋", "TR": "土耳其", "IL": "以色列",
+    "FI": "芬兰", "NO": "挪威", "DK": "丹麦", "IE": "爱尔兰", "AT": "奥地利",
+    "BE": "比利时", "CO": "哥伦比亚", "IR": "伊朗", "KH": "柬埔寨",
+    "EC": "厄瓜多尔", "RO": "罗马尼亚", "KZ": "哈萨克斯坦", "PE": "秘鲁",
+    "BZ": "伯利兹", "CW": "库拉索", "EE": "爱沙尼亚", "LT": "立陶宛",
+    "VE": "委内瑞拉", "BG": "保加利亚", "BO": "玻利维亚", "SY": "叙利亚",
+    "VG": "英属维京", "HN": "洪都拉斯", "PY": "巴拉圭", "IQ": "伊拉克",
+    "RS": "塞尔维亚", "ZW": "津巴布韦", "GT": "危地马拉", "DO": "多米尼加",
+    "SC": "塞舌尔", "CR": "哥斯达黎加", "IM": "马恩岛", "PA": "巴拿马",
+    "MN": "蒙古", "LV": "拉脱维亚", "CY": "塞浦路斯",
 }
 COUNTRY_ALIAS = {v: k for k, v in COUNTRY_NAME.items()}
 COUNTRY_ALIAS.update({
@@ -50,6 +64,14 @@ COUNTRY_ALIAS.update({
     "CHILE": "CL", "CAMBODIA": "KH", "ROMANIA": "RO", "COSTA RICA": "CR",
     "LATVIA": "LV", "CYPRUS": "CY", "MONGOLIA": "MN", "EGYPT": "EG",
     "KENYA": "KE", "PANAMA": "PA", "ISLE OF MAN": "IM", "DOMINICAN REPUBLIC": "DO",
+    "BELIZE": "BZ", "CURACAO": "CW", "ESTONIA": "EE", "LITHUANIA": "LT",
+    "VENEZUELA": "VE", "BOLIVIA": "BO", "SYRIA": "SY",
+    "BRITISH VIRGIN ISLANDS": "VG", "HONDURAS": "HN", "PARAGUAY": "PY",
+    "IRAQ": "IQ", "SERBIA": "RS", "ZIMBABWE": "ZW", "GUATEMALA": "GT",
+    "BULGARIA": "BG", "PAKISTAN": "PK", "ISRAEL": "IL",
+    "SAUDI ARABIA": "SA", "NIGERIA": "NG", "NORWAY": "NO",
+    "NEW ZEALAND": "NZ", "SWITZERLAND": "CH", "BELGIUM": "BE",
+    "CZECHIA": "CZ", "CROATIA": "HR",
 })
 
 def normalize_country(country):

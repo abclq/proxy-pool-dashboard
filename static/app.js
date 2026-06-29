@@ -4,13 +4,17 @@ let statsCache = null, abortCtrl = null;
 const MAX_PAGE = 7;
 
 const COUNTRY_NAME = {
-  CN:"中国",HK:"香港",TW:"台湾",MO:"澳门",US:"美国",JP:"日本",KR:"韩国",SG:"新加坡",
-  DE:"德国",GB:"英国",FR:"法国",IT:"意大利",ES:"西班牙",NL:"荷兰",SE:"瑞典",CH:"瑞士",
-  CA:"加拿大",AU:"澳大利亚",NZ:"新西兰",VN:"越南",TH:"泰国",MY:"马来西亚",ID:"印度尼西亚",PH:"菲律宾",
-  IN:"印度",PK:"巴基斯坦",BD:"孟加拉国",RU:"俄罗斯",UA:"乌克兰",PL:"波兰",CZ:"捷克",
-  BR:"巴西",AR:"阿根廷",MX:"墨西哥",CL:"智利",ZA:"南非",EG:"埃及",NG:"尼日利亚",KE:"肯尼亚",
-  SA:"沙特阿拉伯",AE:"阿联酋",TR:"土耳其",IL:"以色列",FI:"芬兰",NO:"挪威",DK:"丹麦",IE:"爱尔兰",AT:"奥地利",BE:"比利时",
-  CO:"哥伦比亚",IR:"伊朗",KH:"柬埔寨",EC:"厄瓜多尔",RO:"罗马尼亚",KZ:"哈萨克斯坦",PE:"秘鲁",
+CN:"中国",HK:"香港",TW:"台湾",MO:"澳门",US:"美国",JP:"日本",KR:"韩国",SG:"新加坡",
+DE:"德国",GB:"英国",FR:"法国",IT:"意大利",ES:"西班牙",NL:"荷兰",SE:"瑞典",CH:"瑞士",
+CA:"加拿大",AU:"澳大利亚",NZ:"新西兰",VN:"越南",TH:"泰国",MY:"马来西亚",ID:"印度尼西亚",PH:"菲律宾",
+IN:"印度",PK:"巴基斯坦",BD:"孟加拉国",RU:"俄罗斯",UA:"乌克兰",PL:"波兰",CZ:"捷克",
+BR:"巴西",AR:"阿根廷",MX:"墨西哥",CL:"智利",ZA:"南非",EG:"埃及",NG:"尼日利亚",KE:"肯尼亚",
+SA:"沙特阿拉伯",AE:"阿联酋",TR:"土耳其",IL:"以色列",FI:"芬兰",NO:"挪威",DK:"丹麦",IE:"爱尔兰",AT:"奥地利",BE:"比利时",
+CO:"哥伦比亚",IR:"伊朗",KH:"柬埔寨",EC:"厄瓜多尔",RO:"罗马尼亚",KZ:"哈萨克斯坦",PE:"秘鲁",
+BZ:"伯利兹",CW:"库拉索",EE:"爱沙尼亚",LT:"立陶宛",VE:"委内瑞拉",BG:"保加利亚",
+BO:"玻利维亚",SY:"叙利亚",VG:"英属维京",HN:"洪都拉斯",PY:"巴拉圭",IQ:"伊拉克",
+RS:"塞尔维亚",ZW:"津巴布韦",GT:"危地马拉",DO:"多米尼加",SC:"塞舌尔",CR:"哥斯达黎加",
+IM:"马恩岛",PA:"巴拿马",MN:"蒙古",LV:"拉脱维亚",CY:"塞浦路斯",
 };
 
 function esc(s){if(s==null)return'';const d=document.createElement('div');d.appendChild(document.createTextNode(String(s)));return d.innerHTML;}
@@ -40,7 +44,7 @@ function buildCountryDropdown(){
   while(sel.options.length>2)sel.remove(2);
   const regions=Object.entries(statsCache.regions).sort((a,b)=>b[1]-a[1]);
   for(const[code,_n]of regions){
-    if(code==='?')continue;
+    if(!code||code==='?')continue;
     const name=COUNTRY_NAME[code]||code;
     const opt=document.createElement('option');
     opt.value=code;
