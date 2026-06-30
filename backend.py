@@ -150,6 +150,7 @@ def build_proxy(member, hd, jm):
     jd = jm.get(member, {})
     country, location = geo_from_hash_or_cache(ip, hd)
     delay = safe_float(hd.get("latency") or hd.get("delay"), 0.0)
+    if delay <= 0 or delay >= 500: return None  # 只留 <500ms
     proto = (hd.get("protocol") or "").lower().strip()
     if not proto or proto == "unknown": proto = "https" if jd.get("https") else "?"
     return {"ip": ip, "port": port, "protocol": proto, "delay": delay,
@@ -334,7 +335,8 @@ class H(BaseHTTPRequestHandler):
                                 for k, v in zip(region_keys, pipe.execute()):
                                     regions[k.split(":", 2)[2]] = v
                             china = regions.get("CN", 0)
-                            cached = {"total": total, "sample": total, "grades": grades, "protocols": protos,
+                            sample = sum(grades.values())  # 只含 <500ms（build_proxy 已过滤）
+                            cached = {"total": sample if sample else total, "sample": sample, "grades": grades, "protocols": protos,
                                       "china": china, "regions": dict(sorted(regions.items(), key=lambda x: -x[1])[:80]),
                                       "index_ready": True, "stats_cached_at": int(now)}
                             _stats_cache["d"] = cached; _stats_cache["t"] = now
@@ -352,6 +354,7 @@ class H(BaseHTTPRequestHandler):
                                 if not parse_member(m)[0]: continue
                                 seen += 1
                                 delay = safe_float((hd or {}).get("latency") or (hd or {}).get("delay"), 0.0)
+                                if delay <= 0 or delay >= 500: continue  # 只统计 <500ms
                                 g = grade_for_delay(delay); grades[g] = grades.get(g, 0) + 1
                                 proto = ((hd or {}).get("protocol") or "?").lower().strip() or "?"
                                 if proto == "unknown": proto = "?"
@@ -359,7 +362,7 @@ class H(BaseHTTPRequestHandler):
                                 country = normalize_country(((hd or {}).get("country") or (hd or {}).get("region") or "").strip()) or "?"
                                 regions[country] = regions.get(country, 0) + 1
                                 if country == "CN": china += 1
-                        cached = {"total": total, "sample": seen, "grades": grades, "protocols": protos,
+                        cached = {"total": seen, "sample": seen, "grades": grades, "protocols": protos,
                                   "china": china, "regions": dict(sorted(regions.items(), key=lambda x: -x[1])[:80]),
                                   "index_ready": index_ready(), "stats_cached_at": int(now)}
                         _stats_cache["d"] = cached; _stats_cache["t"] = now
