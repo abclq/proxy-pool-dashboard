@@ -191,6 +191,10 @@ def validate_one(proxy_str, meta):
     try: port = int(port_str)
     except Exception: return ("skipped", None)
     country = (meta.get("country") or "").upper()
+    # Normalize: fetcher may store "中国" instead of "CN"
+    if country == "中国" or country == "CHINA": country = "CN"
+    elif country == "香港" or country == "HONG KONG": country = "HK"
+    elif country == "台湾" or country == "TAIWAN": country = "TW"
 
     # ── 协议自动探测 ──
     proto_changed = False
