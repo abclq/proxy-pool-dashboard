@@ -8,12 +8,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-
 #search-box { margin-bottom: 16px; }
 #country-search { width: 100%; max-width: 400px; padding: 10px 14px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; color: #e1e4e8; font-size: 0.95rem; outline: none; }
 #country-search:focus { border-color: #58a6ff; }
-#country-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
-.country-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px 12px; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all .15s; }
+#country-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(95px, 1fr)); gap: 6px; }
+.country-card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px 6px; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 2px; transition: all .15s; }
 .country-card:hover { border-color: #58a6ff; background: #1f2937; transform: translateY(-1px); }
-.country-flag { font-size: 2rem; }
-.country-name { font-size: 0.9rem; color: #e1e4e8; }
-.country-count { font-size: 0.8rem; color: #58a6ff; font-weight: 600; }
+.country-flag { font-size: 1.2rem; }
+.country-name { font-size: 0.75rem; color: #e1e4e8; text-align: center; }
+.country-count { font-size: 0.7rem; color: #58a6ff; font-weight: 600; }
 
 /* Detail */
 #detail-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
