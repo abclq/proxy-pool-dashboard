@@ -389,6 +389,64 @@ class H(BaseHTTPRequestHandler):
                 result.append({"code": code, "name": name, "count": count, "is_china": code == "CN"})
             self._json({"countries": result, "total_countries": len(result)})
             return
+        if path.startswith("/api/country/"):
+            country_code = path.split("/api/country/")[1].upper()
+            if not country_code: self._json({"error":"missing country"}, 400); return
+            try: page = max(1, int(q.get("page", ["1"])[0]))
+            except Exception: page = 1
+            try: limit = min(max(1, int(q.get("limit", [str(PER_PAGE)])[0])), MAX_LIMIT)
+            except Exception: limit = PER_PAGE
+            try: delay_f = float(q.get("delay", [""])[0]) if q.get("delay", [""])[0] != "" else None
+            except Exception: delay_f = None
+            sort_by = q.get("sort", ["delay"])[0]; sort_asc = q.get("asc", ["1"])[0] != "0"
+            proto_f = q.get("protocol", [""])[0].lower()
+            loc_f = q.get("location", [""])[0].lower()
+            search_f = q.get("search", [""])[0].lower()
+
+            # Scan for matching proxies (bounded)
+            total = r1.zcard("proxies:pool")
+            matched_items = []; scanned = 0; batch = 2000
+            max_scan = min(total, 40000)
+            for off in range(0, max_scan, batch):
+                members = r1.zrange("proxies:pool", off, min(total - 1, off + batch - 1))
+                pipe = r1.pipeline(transaction=False)
+                for m in members: pipe.hgetall(f"proxy:{m}")
+                for m, hd in zip(members, pipe.execute()):
+                    scanned += 1
+                    if not hd: continue
+                    ip, _ = parse_member(m)
+                    if not ip: continue
+                    cc = normalize_country((hd.get("country") or hd.get("region") or "").strip()) or "?"
+                    if cc != country_code: continue
+                    proto = (hd.get("protocol") or "?").lower().strip()
+                    if proto_f and proto != proto_f: continue
+                    loc = (hd.get("location") or "").lower()
+                    if loc_f and loc_f not in loc: continue
+                    delay = safe_float(hd.get("latency") or hd.get("delay"), 0.0)
+                    if delay_f is not None and delay > delay_f: continue
+                    if search_f and search_f not in m: continue
+                    matched_items.append({
+                        "ip": ip, "port": hd.get("port", ""),
+                        "protocol": proto, "delay": delay,
+                        "location": hd.get("location") or COUNTRY_NAME.get(country_code, country_code),
+                        "country": cc, "last_check": hd.get("last_check", "?"),
+                        "source": hd.get("source", "?"),
+                    })
+                if scanned >= max_scan: break
+
+            total_matched = len(matched_items)
+            if sort_by == "delay":
+                matched_items.sort(key=lambda x: x.get("delay") or 99999, reverse=not sort_asc)
+            start = (page - 1) * limit
+            page_items = matched_items[start:start + limit]
+            body = {
+                "country": country_code, "country_name": COUNTRY_NAME.get(country_code, country_code),
+                "total_matched": total_matched, "page": page,
+                "pages": max(1, -(-total_matched // limit)),
+                "limit": limit, "proxies": page_items,
+            }
+            self._json(body)
+            return
         self._json({"error":"not found"}, 404)
 
 if __name__ == "__main__":
