@@ -54,8 +54,7 @@ def geo_lookup(ip):
     return "unknown|unknown|unknown", False
 
 def add_proxy(proxy_str, source, protocol="?"):
-    """添加代理到 Redis，原子写入防幽灵残留。
-    缺端口/协议非法的代理直接丢弃。protocol="?" 由验证器自动探测。"""
+    """添加代理到 Redis，入库前快速验证延迟，只留 <500ms。"""
     if REDIS.zscore(KEY_POOL, proxy_str) is not None:
         return False  # 已存在
 
@@ -63,16 +62,39 @@ def add_proxy(proxy_str, source, protocol="?"):
     if len(parts) != 2:
         return False
     ip, port = parts[0], parts[1]
-    # 端口必须是合法数字 > 0
     try:
         pnum = int(port)
         if pnum <= 0 or pnum > 65535:
             return False
     except (ValueError, TypeError):
         return False
-    # 协议：显式传入才接受，不传默认 "?"（验证器自动探测纠正）
     if not protocol or protocol.lower() in ("unknown", ""):
         return False
+
+    # ── 入库前快速验证：HTTP 直连 <500ms 才收 ──
+    latency = None
+    try:
+        import socket as _sock
+        with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
+            s.settimeout(1.5)
+            t0 = time.time()
+            s.connect((ip, pnum))
+            s.send(f"GET http://www.qq.com/ HTTP/1.1\r\nHost: www.qq.com\r\nConnection: close\r\n\r\n".encode())
+            data = b""
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                    if not chunk: break
+                    data += chunk
+                except: break
+            if data and (b"HTTP/" in data or len(data) > 100):
+                latency = int((time.time() - t0) * 1000)
+    except:
+        pass
+
+    if latency is None or latency <= 0 or latency >= 500:
+        return False  # 慢/死代理直接丢弃
+    # ──────────────────────────────────────────────
 
     geo_str, is_cn = geo_lookup(ip)
     geo_parts = geo_str.split("|")
@@ -80,13 +102,13 @@ def add_proxy(proxy_str, source, protocol="?"):
     region = geo_parts[1] if len(geo_parts) > 1 else "unknown"
     city = geo_parts[2] if len(geo_parts) > 2 else "unknown"
 
-    # pipeline 事务：zadd + hset 原子执行，防幽灵代理
+    # pipeline 事务：zadd + hset 原子执行
     pipe = REDIS.pipeline(transaction=True)
     pipe.zadd(KEY_POOL, {proxy_str: 20})
     pipe.hset(f"{PFX_PROXY}{proxy_str}", mapping={
         "ip": ip, "port": port, "protocol": protocol,
         "country": country, "region": region, "city": city,
-        "is_china": str(is_cn), "source": source, "latency": "9999"
+        "is_china": str(is_cn), "source": source, "latency": str(latency)
     })
     pipe.execute()
     return True
