@@ -20,6 +20,8 @@ _r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=1, decode_responses=True)
 GEO_TTL = 7 * 24 * 3600
 FILL_INTERVAL = 600
 BATCH_SIZE = 45
+CN_FILL_INTERVAL = 120  # CN IPs: check every 2 min for faster city resolution
+CN_BATCH_SIZE = 200     # Larger batch for CN since we need province+city
 HTTP_TIMEOUT = 12
 LOCAL_DB_PATH = os.environ.get("IPDB_PATH", os.path.join(os.path.dirname(__file__), "data", "ipdb.bin"))
 LOCAL_DB_UPDATE_URL = "https://download.db-ip.com/free/dbip-country-lite-{year}-{month:02d}.csv.gz"
@@ -465,12 +467,18 @@ def start_filler():
 
 
 def _fill_loop():
+    last_cn_fill = 0
     while _fill_running:
+        now = time.time()
         try:
-            _fill_cycle()
+            if now - last_cn_fill >= CN_FILL_INTERVAL:
+                _fill_cycle(cn_only=True)
+                last_cn_fill = now
+            else:
+                _fill_cycle(cn_only=False)
         except Exception:
             pass
-        time.sleep(FILL_INTERVAL)
+        time.sleep(30)  # Check every 30s which cycle to run
 
 
 def _needs_refresh(ip):
@@ -481,28 +489,38 @@ def _needs_refresh(ip):
     return time.time() - ts > GEO_TTL
 
 
-def _fill_cycle():
-    # queue first, then scan stale/missing from pool. Writes every successful result into DB.
+def _fill_cycle(cn_only=False):
+    batch = CN_BATCH_SIZE if cn_only else BATCH_SIZE
     ips = []
+    # 1. Queue first
     try:
-        while len(ips) < BATCH_SIZE:
+        while len(ips) < batch:
             ip = _r.spop("geo:queue")
             if not ip:
                 break
             if _needs_refresh(ip):
+                cc = _local_lookup(ip)
+                if cn_only and cc != "CN":
+                    _r.sadd("geo:queue", ip)  # Put back for regular cycle
+                    continue
                 ips.append(ip)
     except Exception:
         pass
-    if len(ips) < BATCH_SIZE:
+    # 2. Scan pool for stale/missing
+    if len(ips) < batch:
         try:
             for m in _r.zscan_iter("proxies:pool", count=1000):
                 key = m[0]
                 ip = key.rsplit(":", 1)[0] if ":" in key else key
                 if ip in ("0.0.0.0", "127.0.0.1"):
                     continue
+                if cn_only:
+                    cc = _local_lookup(ip)
+                    if cc != "CN":
+                        continue
                 if _needs_refresh(ip):
                     ips.append(ip)
-                if len(ips) >= BATCH_SIZE:
+                if len(ips) >= batch:
                     break
         except Exception:
             pass
@@ -512,7 +530,7 @@ def _fill_cycle():
         ip = item.get("query")
         if ip:
             _store(ip, item)
-    # unresolved placeholders for 1 hour only; retry later, not 7 days.
+    # Unresolved placeholders — 1 hour TTL
     for ip in ips:
         if not _cached(ip):
             try:
@@ -525,6 +543,28 @@ def _init():
     _load_local_db()
     t = threading.Thread(target=_local_db_updater_loop, daemon=True)
     t.start()
+    # Enqueue all distinct CN IPs for city-level geo lookup
+    enqueue_cn_ips()
     start_filler()
+
+def enqueue_cn_ips():
+    """Enqueue all unique CN IPs from pool for online geo lookup."""
+    seen = set()
+    count = 0
+    try:
+        for m in _r.zscan_iter("proxies:pool", count=2000):
+            key = m[0]
+            ip = key.rsplit(":", 1)[0] if ":" in key else key
+            if ip in seen or ip in ("0.0.0.0", "127.0.0.1"):
+                continue
+            cc = _local_lookup(ip)
+            if cc == "CN":
+                seen.add(ip)
+                _r.sadd("geo:queue", ip)
+                count += 1
+    except Exception as e:
+        pass
+    if count:
+        print(f"[geo] enqueued {count} unique CN IPs for city lookup")
 
 _searcher = None
