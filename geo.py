@@ -20,8 +20,8 @@ _r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=1, decode_responses=True)
 GEO_TTL = 7 * 24 * 3600
 FILL_INTERVAL = 600
 BATCH_SIZE = 45
-CN_FILL_INTERVAL = 120  # CN IPs: check every 2 min for faster city resolution
-CN_BATCH_SIZE = 200     # Larger batch for CN since we need province+city
+CN_FILL_INTERVAL = 60   # CN IPs: check every 1 min for faster city resolution
+CN_BATCH_SIZE = 500      # Larger batch for CN since we need province+city
 HTTP_TIMEOUT = 12
 LOCAL_DB_PATH = os.environ.get("IPDB_PATH", os.path.join(os.path.dirname(__file__), "data", "ipdb.bin"))
 LOCAL_DB_UPDATE_URL = "https://download.db-ip.com/free/dbip-country-lite-{year}-{month:02d}.csv.gz"
@@ -46,7 +46,39 @@ COUNTRY_CODE = {
     "AT": "奥地利", "PT": "葡萄牙", "GR": "希腊", "IE": "爱尔兰",
     "DK": "丹麦", "FI": "芬兰", "NO": "挪威", "IL": "以色列",
     "HK": "香港", "TW": "台湾", "MO": "澳门",
+    "MU": "毛里求斯", "AZ": "阿塞拜疆",
 }
+
+# Reverse mapping for normalizing country codes
+_COUNTRY_REVERSE = {v: k for k, v in COUNTRY_CODE.items()}
+_COUNTRY_REVERSE.update({
+    "CHINA": "CN", "UNITED STATES": "US", "USA": "US",
+    "UNITED KINGDOM": "GB", "UK": "GB", "GREAT BRITAIN": "GB",
+    "NETHERLANDS": "NL", "GERMANY": "DE", "FRANCE": "FR", "CANADA": "CA",
+    "RUSSIA": "RU", "INDIA": "IN", "INDONESIA": "ID", "BRAZIL": "BR",
+    "SINGAPORE": "SG", "JAPAN": "JP", "SOUTH KOREA": "KR", "KOREA": "KR",
+    "THAILAND": "TH", "VIET NAM": "VN", "VIETNAM": "VN", "PHILIPPINES": "PH",
+    "HONG KONG": "HK", "TAIWAN": "TW", "MACAO": "MO", "MACAU": "MO",
+    "SPAIN": "ES", "ITALY": "IT", "POLAND": "PL", "SWEDEN": "SE", "FINLAND": "FI",
+    "AUSTRALIA": "AU", "MEXICO": "MX", "COLOMBIA": "CO", "ARGENTINA": "AR",
+    "BANGLADESH": "BD", "MALAYSIA": "MY", "TURKIYE": "TR", "TURKEY": "TR",
+    "IRAN": "IR", "UKRAINE": "UA", "SOUTH AFRICA": "ZA", "SEYCHELLES": "SC",
+    "KAZAKHSTAN": "KZ", "UNITED ARAB EMIRATES": "AE", "IRELAND": "IE",
+    "DENMARK": "DK", "AUSTRIA": "AT", "PERU": "PE", "ECUADOR": "EC",
+    "CHILE": "CL", "CAMBODIA": "KH", "ROMANIA": "RO", "COSTA RICA": "CR",
+    "LATVIA": "LV", "CYPRUS": "CY", "MONGOLIA": "MN", "EGYPT": "EG",
+    "KENYA": "KE", "PANAMA": "PA", "ISLE OF MAN": "IM", "DOMINICAN REPUBLIC": "DO",
+    "BELIZE": "BZ", "CURACAO": "CW", "ESTONIA": "EE", "LITHUANIA": "LT",
+    "VENEZUELA": "VE", "BOLIVIA": "BO", "SYRIA": "SY",
+    "BRITISH VIRGIN ISLANDS": "VG", "HONDURAS": "HN", "PARAGUAY": "PY",
+    "IRAQ": "IQ", "SERBIA": "RS", "ZIMBABWE": "ZW", "GUATEMALA": "GT",
+    "BULGARIA": "BG", "PAKISTAN": "PK", "ISRAEL": "IL",
+    "SAUDI ARABIA": "SA", "NIGERIA": "NG", "NORWAY": "NO",
+    "NEW ZEALAND": "NZ", "SWITZERLAND": "CH", "BELGIUM": "BE",
+    "CZECHIA": "CZ", "CROATIA": "HR",
+    "NEPAL": "NP", "LIBYA": "LY", "OMAN": "OM", "HUNGARY": "HU",
+    "MAURITIUS": "MU", "AZERBAIJAN": "AZ", "GHANA": "GH",
+})
 
 # ═══════════ Local Binary IP Database (offline, ~1μs lookup) ═══════════
 
@@ -173,16 +205,29 @@ _fill_running = False
 _proxy_cache = {"t": 0, "d": []}
 
 
-def resolve(ip):
+def resolve(ip, update_proxy_hashes=False):
     # 1. Local binary DB (fastest, offline)
     cc = _local_lookup(ip)
     if cc != "ZZ":
-        # Check Redis cache for richer location (province+city)
+        # CN IP: always do online lookup for city detail
+        if cc == "CN":
+            data = _query_one(ip, prefer_cn=True)
+            if data:
+                _store(ip, data)
+                loc = _format_location(data)
+                if loc and loc != COUNTRY_CODE.get(cc, cc):
+                    if update_proxy_hashes:
+                        _sync_location_to_proxies(ip, loc)
+                    return loc
+            _enqueue_ip(ip)
+            country = COUNTRY_CODE.get(cc, cc)
+            return country
+        # Non-CN: check Redis cache for richer location
         data = _cached(ip)
         if data and not data.get("_placeholder"):
             loc = _format_location(data)
             if loc and loc != COUNTRY_CODE.get(cc, cc):
-                return loc  # 有城市信息优先用
+                return loc
         country = COUNTRY_CODE.get(cc, cc)
         return country
 
@@ -196,6 +241,14 @@ def resolve(ip):
     return "..."
 
 
+def _sync_location_to_proxies(ip, location):
+    try:
+        for k in _r.scan_iter(f"proxy:{ip}:*", count=100):
+            _r.hset(k, "location", location)
+    except Exception:
+        pass
+
+
 def resolve_region(ip):
     # 1. Local binary DB
     cc = _local_lookup(ip)
@@ -204,10 +257,18 @@ def resolve_region(ip):
 
     # 2. Redis cache
     data = _cached(ip)
-    if not data or data.get("_placeholder"):
-        _enqueue_ip(ip)
-        return "?"
-    return data.get("countryCode", "?") or "?"
+    if data and not data.get("_placeholder"):
+        code = data.get("countryCode", "")
+        if code and code != "?" and len(code) == 2 and code.isascii() and code.isalpha():
+            return code
+        if code and code != "?":
+            resolved = _COUNTRY_REVERSE.get(code.upper())
+            if resolved and len(resolved) == 2:
+                return resolved
+
+    # 3. Enqueue for future resolution
+    _enqueue_ip(ip)
+    return "?"
 
 
 def resolve_and_store(ip, proxy_key=None, force=False):
@@ -232,8 +293,12 @@ def resolve_and_store(ip, proxy_key=None, force=False):
             if cc == "CN":
                 _enqueue_ip(ip)
             return data
-    data = _query_one(ip)
+    is_cn = _local_lookup(ip) == "CN"
+    data = _query_one(ip, prefer_cn=is_cn)
     if data:
+        # If CN IP got English-only result, try again with Chinese API later
+        if is_cn and not _has_chinese_location(data):
+            _enqueue_ip(ip)
         _store(ip, data)
         if proxy_key:
             _write_proxy_geo(proxy_key, data)
@@ -268,7 +333,17 @@ def _format_location(data):
             has_cjk = any('\u4e00' <= c <= '\u9fff' for c in prov)
             if not has_cjk and any(c.isascii() and c.isalpha() for c in prov):
                 prov = ""  # filter English province names like "Zhejiang"
-        return (prov + city) if prov and city else (prov or city or "中国")
+        if prov or city:
+            return (prov + city) if prov and city else (prov or city)
+        # No usable Chinese location found: purge stale cache and re-enqueue
+        ip_addr = data.get("query", "")
+        if ip_addr:
+            try:
+                _r.delete(f"geo:{ip_addr}")
+            except Exception:
+                pass
+            _enqueue_ip(ip_addr)
+        return "中国"
     return COUNTRY_CODE.get(cc, data.get("country", "?"))
 
 
@@ -291,7 +366,21 @@ def _store(ip, data):
 
 def _write_proxy_geo(proxy_key, data):
     try:
-        cc = (data.get("countryCode") or "?").upper()
+        cc = (data.get("countryCode") or "").upper()
+        if not cc or cc == "?":
+            ip = data.get("query", "")
+            if ip:
+                lcc = _local_lookup(ip)
+                if lcc != "ZZ":
+                    cc = lcc
+        if not cc or cc == "?":
+            return
+        if len(cc) != 2 or not (cc.isascii() and cc.isalpha()):
+            resolved = _COUNTRY_REVERSE.get(cc)
+            if resolved and len(resolved) == 2:
+                cc = resolved
+            else:
+                return
         loc = _format_location(data)
         _r.hset(f"proxy:{proxy_key}", mapping={
             "country": cc,
@@ -377,15 +466,33 @@ def _query_batch(ips):
     return out
 
 
-def _query_one(ip):
+def _query_one(ip, prefer_cn=False):
     arr = _query_batch([ip])
     if arr:
-        return arr[0]
-    for fn in (_query_ip9, _query_freeipapi, _query_ipwhois):
+        data = arr[0]
+        cc = (data.get("countryCode") or "").upper()
+        if not prefer_cn or cc != "CN" or _has_chinese_location(data):
+            return data
+    # For CN IPs, prioritize Chinese-language APIs over English ones
+    if prefer_cn:
+        for fn in (_query_ip9, _query_ipwhois, _query_freeipapi):
+            data = fn(ip)
+            if data and _has_chinese_location(data):
+                return data
+    for fn in (_query_ip9, _query_ipwhois, _query_freeipapi, _query_ipapico, _query_ipinfo, _query_ipsb):
         data = fn(ip)
         if data:
             return data
     return None
+
+
+def _has_chinese_location(data):
+    rn = data.get("regionName", "") or ""
+    cy = data.get("city", "") or ""
+    for s in (rn, cy):
+        if s and any(0x4e00 <= ord(c) <= 0x9fff for c in s):
+            return True
+    return False
 
 
 def _json_get(url, timeout=8):
@@ -403,6 +510,13 @@ def _normalize(ip, country_code, country, region, city, source):
     cc = (country_code or "").upper()
     if not cc:
         return None
+    # Normalize non-ISO country codes (full names -> 2-char code)
+    if len(cc) != 2 or not (cc.isascii() and cc.isalpha()):
+        resolved = _COUNTRY_REVERSE.get(cc)
+        if not resolved and country:
+            resolved = _COUNTRY_REVERSE.get(country.upper())
+        if resolved and len(resolved) == 2:
+            cc = resolved
     return {
         "status": "success",
         "country": country or COUNTRY_CODE.get(cc, cc),
@@ -454,6 +568,46 @@ def _query_ipwhois(ip):
         d.get("region"),
         d.get("city"),
         "ipwhois",
+    )
+
+
+# ── Spec APIs (ipapi.co, ipinfo.io, ip.sb) ──
+def _query_ipapico(ip):
+    d = _json_get("https://ipapi.co/" + urllib.parse.quote(ip) + "/json/", timeout=8)
+    if not d or d.get("error"):
+        return None
+    return _normalize(
+        ip,
+        d.get("country_code") or d.get("country"),
+        d.get("country_name"),
+        d.get("region"),
+        d.get("city"),
+        "ipapico",
+    )
+
+
+def _query_ipinfo(ip):
+    d = _json_get("https://ipinfo.io/" + urllib.parse.quote(ip) + "/json", timeout=8)
+    if not d or "error" in d:
+        return None
+    cc = d.get("country", "")
+    parts = (d.get("region") or "").split(",")
+    region = parts[0].strip() if parts else ""
+    city = d.get("city", "")
+    return _normalize(ip, cc, cc, region, city, "ipinfo")
+
+
+def _query_ipsb(ip):
+    d = _json_get("https://api.ip.sb/geoip/" + urllib.parse.quote(ip), timeout=8)
+    if not d or "error" in d:
+        return None
+    return _normalize(
+        ip,
+        d.get("country_code"),
+        d.get("country"),
+        d.get("region"),
+        d.get("city"),
+        "ipsb",
     )
 
 

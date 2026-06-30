@@ -7,12 +7,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 KEY_POOL = "proxies:pool"
 PFX_PROXY = "proxy:"
 CHECK_INTERVAL = 30
-HARVEST_INTERVAL = 300
-VALIDATE_THREADS = 20
-VALIDATE_TIMEOUT = 3
-CREDIT_MAX = 100
+HARVEST_INTERVAL = 1800
+VALIDATE_THREADS = 50
+VALIDATE_TIMEOUT = 2
+CREDIT_MAX = 50
 SUBMIT_CHUNK = 1000
 S_LATENCY_MAX = 500  # 只留 <500ms
+OVERSEAS_PROXY = "172.18.0.1:10808"  # 本机代理，海外节点复测走这里
 
 POOL = redis.ConnectionPool(
     host=os.environ.get("REDIS_HOST", "proxy-redis"), port=6379, db=1,
@@ -42,7 +43,8 @@ def resolve_geo_and_store(ip, proxy_key, force=False):
 
 # ── 信用分 Lua ──
 CREDIT_SCRIPT = REDIS.register_script("""
-    local s = redis.call('ZINCRBY', KEYS[1], ARGV[1], ARGV[2])
+    local s = tonumber(redis.call('ZINCRBY', KEYS[1], ARGV[1], ARGV[2]))
+    if not s then return 0 end
     if s < 0 then
         redis.call('ZREM', KEYS[1], ARGV[2])
         redis.call('DEL', KEYS[2] .. ARGV[2])
@@ -125,33 +127,18 @@ def socks5_test(ip, port):
 
 # ── 走代理复测 ──
 def _pick_test_routes():
-    """从 S 级海外 HTTP 代理中选测试路由"""
-    candidates = []
-    try:
-        for m in REDIS.zrevrange(KEY_POOL, 0, 500):
-            hd = REDIS.hgetall(f"{PFX_PROXY}{m}")
-            if not hd: continue
-            proto = (hd.get("protocol") or "").lower()
-            country = (hd.get("country") or "").upper()
-            lat_str = hd.get("latency", "")
-            if proto not in ("http", "https"): continue
-            if country in ("CN", "?", ""): continue
-            try:
-                lat = float(lat_str) if lat_str and lat_str not in ("9999", "") else 9999
-            except Exception: continue
-            if lat < S_LATENCY_MAX:
-                candidates.append(m)
-            if len(candidates) >= 10: break
-    except Exception: pass
-    random.shuffle(candidates)
-    return candidates[:4]
+    """返回本机代理地址 (10808)，用于海外节点复测"""
+    return [OVERSEAS_PROXY]
 
-def _http_test_via_proxy(ip, port, via_proxy):
+def _http_test_via_proxy(ip, port, via_proxy=None):
     """通过中间代理 via_proxy 测试目标代理 ip:port"""
     try:
         via_ip, via_port = via_proxy.split(":", 1)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(VALIDATE_TIMEOUT + 5)
+            if via_proxy is None:
+                via_proxy = OVERSEAS_PROXY
+                via_ip, via_port = via_proxy.split(":", 1)
             t0 = time.time()
             s.connect((via_ip, int(via_port)))
             s.send(f"CONNECT {ip}:{port} HTTP/1.1\r\nHost: {ip}:{port}\r\n\r\n".encode())
@@ -249,9 +236,9 @@ def validate_one(proxy_str, meta):
                         REDIS.hset(f"{PFX_PROXY}{proxy_str}", mapping=hset_args)
                         credit_add(proxy_str, 5)
                         return ("ok_via_proxy", "S")
-            # 慢代理直接删
-            _remove_proxy(proxy_str)
-            return ("removed_slow", None)
+            # >= 500ms: credit -20 (不删除，下次复测)
+            credit_add(proxy_str, -20)
+            return ("slow", None)
     else:
         # 直连失败 → 海外走代理复测
         if _is_overseas(country) and proto in ("http", "https", "?"):
@@ -283,7 +270,7 @@ def validate_all(executor):
         print("[validate] pool empty"); return
 
     results = {"ok_s": 0, "ok_via_proxy": 0, "fail": 0, "removed": 0,
-               "removed_slow": 0, "skipped": 0, "S": 0}
+               "slow": 0, "skipped": 0, "S": 0}
     now_ts = time.time()
     to_check = []; skipped = 0
 
@@ -316,7 +303,7 @@ def validate_all(executor):
             if status == "ok_s": results["ok_s"] += 1; results["S"] += 1
             elif status == "ok_via_proxy": results["ok_via_proxy"] += 1; results["S"] += 1
             elif status == "removed": results["removed"] += 1
-            elif status == "removed_slow": results["removed_slow"] += 1
+            elif status == "slow": results["slow"] += 1
             elif status == "fail": results["fail"] += 1
         except Exception: results["fail"] += 1
 
@@ -349,7 +336,7 @@ def harvest_new_proxies():
 # ── 主循环 ──
 def main():
     print(f"[engine] start — pool={proxy_count()} (S<{S_LATENCY_MAX}ms only)")
-    last_harvest = 0
+    last_harvest = time.time()
     executor = ThreadPoolExecutor(max_workers=VALIDATE_THREADS, thread_name_prefix="val")
     try:
         while True:

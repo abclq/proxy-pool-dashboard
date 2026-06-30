@@ -44,7 +44,7 @@ while True:
                 restart_count = info["restarts"] + 1
                 elapsed_since_last = time.time() - info["last_restart"]
                 if elapsed_since_last > BACKOFF_WINDOW:
-                    restart_count = 0  # reset — process was stable
+                    restart_count = 0  # reset - process was stable
 
                 delay = min(BACKOFF_MAX, BACKOFF_BASE * (2 ** restart_count))
                 print(f"[dashboard] backoff {delay:.0f}s before restart (attempt #{restart_count})")

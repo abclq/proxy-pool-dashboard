@@ -60,6 +60,8 @@ COUNTRY_NAME = {
     "GH": "加纳", "AZ": "阿塞拜疆", "UZ": "乌兹别克斯坦", "UY": "乌拉圭",
     "NI": "尼加拉瓜", "PT": "葡萄牙", "LB": "黎巴嫩", "SN": "塞内加尔",
     "AM": "亚美尼亚", "BS": "巴哈马",
+    "LK": "斯里兰卡", "CM": "喀麦隆", "BF": "布基纳法索", "KG": "吉尔吉斯斯坦",
+    "MU": "毛里求斯",
 }
 COUNTRY_ALIAS = {v: k for k, v in COUNTRY_NAME.items()}
 COUNTRY_ALIAS.update({
@@ -88,7 +90,18 @@ COUNTRY_ALIAS.update({
     "NEW ZEALAND": "NZ", "SWITZERLAND": "CH", "BELGIUM": "BE",
     "CZECHIA": "CZ", "CROATIA": "HR",
     "NEPAL": "NP", "LIBYA": "LY", "OMAN": "OM", "HUNGARY": "HU",
+    "MAURITIUS": "MU", "AZERBAIJAN": "AZ", "GHANA": "GH",
 })
+
+def _flag_emoji(code):
+    """Return flag emoji for ISO country code."""
+    if not code or code == "?" or len(code) != 2:
+        return "🏳"
+    a = code.upper()
+    try:
+        return chr(0x1F1E6 + ord(a[0]) - 65) + chr(0x1F1E6 + ord(a[1]) - 65)
+    except Exception:
+        return "🏳"
 
 def normalize_country(country):
     c = (country or "").strip()
@@ -182,19 +195,21 @@ def location_display(country_code, loc, ip=None):
 
 @lru_cache(maxsize=50000)
 def geo_cached(ip):
-    return geo.resolve_region(ip), geo.resolve(ip)
+    return geo.resolve_region(ip), geo.resolve(ip, update_proxy_hashes=True)
 
 def build_proxy(member, hd, jm):
     ip, port = parse_member(member)
     if not ip: return None
     jd = jm.get(member, {})
     country, location = geo_from_hash_or_cache(ip, hd)
+    region = normalize_country(country)
+    if not region or region == "?": return None  # 无效国家，跳过
     delay = safe_float(hd.get("latency") or hd.get("delay"), 0.0)
     if delay <= 0 or delay >= 500: return None  # 只留 <500ms
     proto = (hd.get("protocol") or "").lower().strip()
     if not proto or proto == "unknown": proto = "https" if jd.get("https") else "?"
     return {"ip": ip, "port": port, "protocol": proto, "delay": delay,
-            "grade": grade_for_delay(delay), "region": normalize_country(country) or "?", "location": location_display(country, location, ip),
+            "grade": grade_for_delay(delay), "region": region, "location": location_display(country, location, ip),
             "source": hd.get("source") or jd.get("source", "?"),
             "anon": hd.get("anonymous") or jd.get("anonymous", "?"),
             "last_check": hd.get("last_check", "?"), "is_china": country == "CN"}
@@ -399,7 +414,8 @@ class H(BaseHTTPRequestHandler):
                                 proto = ((hd or {}).get("protocol") or "?").lower().strip() or "?"
                                 if proto == "unknown": proto = "?"
                                 protos[proto] = protos.get(proto, 0) + 1
-                                country = normalize_country(((hd or {}).get("country") or (hd or {}).get("region") or "").strip()) or "?"
+                                country = normalize_country(((hd or {}).get("country") or (hd or {}).get("region") or "").strip())
+                                if not country or country == "?": continue  # 跳过无效国家
                                 regions[country] = regions.get(country, 0) + 1
                                 if country == "CN": china += 1
                         cached = {"total": seen, "sample": seen, "grades": grades, "protocols": protos,
@@ -430,12 +446,13 @@ class H(BaseHTTPRequestHandler):
                     for m in members: pipe.hgetall(f"proxy:{m}")
                     for m, hd in zip(members, pipe.execute()):
                         if not parse_member(m)[0]: continue
-                        cc = normalize_country(((hd or {}).get("country") or (hd or {}).get("region") or "").strip()) or "?"
+                        cc = normalize_country(((hd or {}).get("country") or (hd or {}).get("region") or "").strip())
+                        if not cc or cc == "?": continue  # 跳过无效国家
                         countries[cc] = countries.get(cc, 0) + 1
             result = []
             for code, count in sorted(countries.items(), key=lambda x: -x[1]):
                 name = COUNTRY_NAME.get(code, code)
-                result.append({"code": code, "name": name, "count": count, "is_china": code == "CN"})
+                result.append({"code": code, "name": name, "count": count, "flag": _flag_emoji(code), "is_china": code == "CN"})
             self._json({"countries": result, "total_countries": len(result)})
             return
         if path.startswith("/api/country/"):

@@ -76,7 +76,7 @@ def add_proxy(proxy_str, source, protocol="http"):
     try:
         import socket as _sock
         with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
-            s.settimeout(1.5)
+            s.settimeout(3.0)
             t0 = time.time()
             s.connect((ip, pnum))
             s.send(f"GET http://www.qq.com/ HTTP/1.1\r\nHost: www.qq.com\r\nConnection: close\r\n\r\n".encode())
