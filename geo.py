@@ -276,12 +276,26 @@ def resolve_and_store(ip, proxy_key=None, force=False):
     if not force:
         data = _cached(ip)
         if data and not data.get("_placeholder"):
-            if proxy_key:
-                _write_proxy_geo(proxy_key, data)
-            return data
+            # For CN IPs cached without city detail, force online to get province+city
+            if data.get("countryCode") == "CN" and not data.get("city") and not data.get("regionName"):
+                pass  # fall through to online query below
+            else:
+                if proxy_key:
+                    _write_proxy_geo(proxy_key, data)
+                return data
         # Check local DB
         cc = _local_lookup(ip)
         if cc != "ZZ":
+            # For CN IPs, do online lookup now to get province+city (spec: no cache short-circuit)
+            if cc == "CN":
+                online = _query_one(ip)
+                if online:
+                    _store(ip, online)
+                    if proxy_key:
+                        _write_proxy_geo(proxy_key, online)
+                    return online
+                # fallback: store placeholder with country-only data, enqueue for retry
+                _enqueue_ip(ip)
             data = {"status": "success", "country": COUNTRY_CODE.get(cc, cc),
                     "countryCode": cc, "regionName": "", "city": "",
                     "query": ip, "source": "local-db",
@@ -289,9 +303,6 @@ def resolve_and_store(ip, proxy_key=None, force=False):
             _store(ip, data)
             if proxy_key:
                 _write_proxy_geo(proxy_key, data)
-            # For CN IPs, enqueue online lookup to get city-level detail
-            if cc == "CN":
-                _enqueue_ip(ip)
             return data
     is_cn = _local_lookup(ip) == "CN"
     data = _query_one(ip, prefer_cn=is_cn)
@@ -322,9 +333,15 @@ def _format_location(data):
     if cc == "CN":
         prov = data.get("regionName", "") or ""
         city = data.get("city", "") or ""
+        # filter junk words in city
         junk = ("阿里", "腾讯", "百度", "华为", "电信", "联通", "移动", "云")
         if city and any(j in city for j in junk):
             city = ""
+        # filter non-city locality names (bridges, roads, towns, etc.)
+        locality_junk = ("桥", "路", "镇", "村", "街", "广场", "小区", "园区", "大厦", "花园", "中心")
+        if city and any(w in city for w in locality_junk):
+            city = ""
+        # filter English names
         if city:
             has_cjk = any('\u4e00' <= c <= '\u9fff' for c in city)
             if not has_cjk and any(c.isascii() and c.isalpha() for c in city):
@@ -333,8 +350,22 @@ def _format_location(data):
             has_cjk = any('\u4e00' <= c <= '\u9fff' for c in prov)
             if not has_cjk and any(c.isascii() and c.isalpha() for c in prov):
                 prov = ""  # filter English province names like "Zhejiang"
+        # Clean up municipality names
+        if prov.endswith("市") and not city:
+            prov = prov.rstrip("市")
+        # Clean up city "市" suffix (e.g. 广州市→广州)
+        if city and city.endswith("市") and len(city) > 2:
+            city = city.rstrip("市")
+        # deduplicate: 北京市+北京→北京, 上海+上海→上海
+        if prov and city:
+            prov_clean = prov.rstrip("市省自治区")
+            city_clean = city.rstrip("市")
+            if prov_clean == city_clean or prov == city:
+                return prov_clean if prov.endswith("市") else prov
+        if prov and city:
+            return prov + city
         if prov or city:
-            return (prov + city) if prov and city else (prov or city)
+            return prov or city
         # No usable Chinese location found: purge stale cache and re-enqueue
         ip_addr = data.get("query", "")
         if ip_addr:
