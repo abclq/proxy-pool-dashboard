@@ -53,7 +53,7 @@ def geo_lookup(ip):
         pass
     return "unknown|unknown|unknown", False
 
-def add_proxy(proxy_str, source, protocol="?"):
+def add_proxy(proxy_str, source, protocol="http"):
     """添加代理到 Redis，入库前快速验证延迟，只留 <500ms。"""
     if REDIS.zscore(KEY_POOL, proxy_str) is not None:
         return False  # 已存在
@@ -68,7 +68,7 @@ def add_proxy(proxy_str, source, protocol="?"):
             return False
     except (ValueError, TypeError):
         return False
-    if not protocol or protocol.lower() in ("unknown", ""):
+    if not protocol or protocol.lower() in ("unknown", "", "?"):
         return False
 
     # ── 入库前快速验证：HTTP 直连 <500ms 才收 ──
