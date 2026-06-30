@@ -72,7 +72,16 @@ def add_proxy(proxy_str, source, protocol="http"):
     if not protocol or protocol.lower() in ("unknown", "", "?"):
         return False
 
-    # ── 不做连接验证，直接入库（validator 会全量验证并设真实延迟）──
+    # ── TCP 连通性测试（只采活源）
+    import socket as sock_mod
+    try:
+        s = sock_mod.socket(sock_mod.AF_INET, sock_mod.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect((ip, pnum))
+        s.close()
+    except Exception:
+        return False
+
     latency = 0
 
     geo_str, is_cn = geo_lookup(ip)

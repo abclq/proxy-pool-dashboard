@@ -236,9 +236,9 @@ def validate_one(proxy_str, meta):
                         REDIS.hset(f"{PFX_PROXY}{proxy_str}", mapping=hset_args)
                         credit_add(proxy_str, 5)
                         return ("ok_via_proxy", "S")
-            # >= 500ms: credit -20 (不删除，下次复测)
-            credit_add(proxy_str, -20)
-            return ("slow", None)
+            # >= 500ms: 直接删除
+            _remove_proxy(proxy_str)
+            return ("removed", None)
     else:
         # 直连失败 → 海外走代理复测
         if _is_overseas(country) and proto in ("http", "https", "?"):
@@ -254,13 +254,12 @@ def validate_one(proxy_str, meta):
                     credit_add(proxy_str, 5)
                     return ("ok_via_proxy", "S")
 
-        # 彻底失败
+        # 彻底失败: 直接删除
         if geo_resolver:
             try: geo_resolver.resolve(ip)
             except Exception: pass
-        REDIS.hset(f"{PFX_PROXY}{proxy_str}", mapping={"last_check": now, "success_rate": "0"})
-        removed = credit_add(proxy_str, -15)
-        return ("removed" if removed else "fail", None)
+        _remove_proxy(proxy_str)
+        return ("removed", None)
 
 # ── 批量验证 ──
 def validate_all(executor):
