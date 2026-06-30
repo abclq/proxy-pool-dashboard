@@ -175,6 +175,12 @@ def resolve(ip):
     # 1. Local binary DB (fastest, offline)
     cc = _local_lookup(ip)
     if cc != "ZZ":
+        # Check Redis cache for richer location (province+city)
+        data = _cached(ip)
+        if data and not data.get("_placeholder"):
+            loc = _format_location(data)
+            if loc and loc != COUNTRY_CODE.get(cc, cc):
+                return loc  # 有城市信息优先用
         country = COUNTRY_CODE.get(cc, cc)
         return country
 
@@ -215,10 +221,14 @@ def resolve_and_store(ip, proxy_key=None, force=False):
         if cc != "ZZ":
             data = {"status": "success", "country": COUNTRY_CODE.get(cc, cc),
                     "countryCode": cc, "regionName": "", "city": "",
-                    "query": ip, "source": "local-db", "geo_updated_at": int(time.time())}
+                    "query": ip, "source": "local-db",
+                    "geo_updated_at": 0 if cc == "CN" else int(time.time())}
             _store(ip, data)
             if proxy_key:
                 _write_proxy_geo(proxy_key, data)
+            # For CN IPs, enqueue online lookup to get city-level detail
+            if cc == "CN":
+                _enqueue_ip(ip)
             return data
     data = _query_one(ip)
     if data:
@@ -252,6 +262,10 @@ def _format_location(data):
             has_cjk = any('\u4e00' <= c <= '\u9fff' for c in city)
             if not has_cjk and any(c.isascii() and c.isalpha() for c in city):
                 city = ""
+        if prov:
+            has_cjk = any('\u4e00' <= c <= '\u9fff' for c in prov)
+            if not has_cjk and any(c.isascii() and c.isalpha() for c in prov):
+                prov = ""  # filter English province names like "Zhejiang"
         return (prov + city) if prov and city else (prov or city or "中国")
     return COUNTRY_CODE.get(cc, data.get("country", "?"))
 

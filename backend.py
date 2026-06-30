@@ -143,14 +143,42 @@ def geo_from_hash_or_cache(ip, hd):
     location = (hd.get("location") or hd.get("region_label") or hd.get("city") or "").strip()
     country = normalize_country(country)
     if country:
+        country_name = COUNTRY_NAME.get(country, country)
+        if not location or location in ("unknown", "?", "0", country_name):
+            # Location is just country name — try geo cache for city detail
+            try:
+                lo = geo_cached(ip)[1]
+                if lo and lo not in ("?", "unknown", country_name):
+                    location = lo
+            except Exception:
+                pass
         if not location or location in ("unknown", "?", "0"):
-            location = COUNTRY_NAME.get(country, country)
+            location = country_name
         return country, location
     try:
         cr, lo = geo_cached(ip)
         return cr or "?", lo or "?"
     except Exception:
         return "?", "?"
+
+def location_display(country_code, loc, ip=None):
+    """Return best display location string, trying geo cache for CN city detail."""
+    cn = COUNTRY_NAME.get(country_code, country_code)
+    if not loc or loc in ("unknown", "?", "0", cn):
+        if ip:
+            try:
+                lo = geo_cached(ip)[1]
+                if lo and lo not in ("?", "unknown", cn):
+                    return lo
+            except Exception:
+                pass
+        return cn
+    # Filter English-only names for CN proxies
+    if country_code == "CN":
+        has_cjk = any('\u4e00' <= c <= '\u9fff' for c in loc)
+        if not has_cjk and any(c.isascii() and c.isalpha() for c in loc):
+            return cn
+    return loc
 
 @lru_cache(maxsize=50000)
 def geo_cached(ip):
@@ -166,7 +194,7 @@ def build_proxy(member, hd, jm):
     proto = (hd.get("protocol") or "").lower().strip()
     if not proto or proto == "unknown": proto = "https" if jd.get("https") else "?"
     return {"ip": ip, "port": port, "protocol": proto, "delay": delay,
-            "grade": grade_for_delay(delay), "region": normalize_country(country) or "?", "location": location,
+            "grade": grade_for_delay(delay), "region": normalize_country(country) or "?", "location": location_display(country, location, ip),
             "source": hd.get("source") or jd.get("source", "?"),
             "anon": hd.get("anonymous") or jd.get("anonymous", "?"),
             "last_check": hd.get("last_check", "?"), "is_china": country == "CN"}
@@ -456,7 +484,7 @@ class H(BaseHTTPRequestHandler):
                                 matched_batch.append({
                                     "ip": ip, "port": port,
                                     "protocol": proto, "delay": delay,
-                                    "location": meta.get("location") or COUNTRY_NAME.get(country_code, country_code),
+                                    "location": location_display(country_code, meta.get("location"), ip),
                                     "country": country_code, "last_check": meta.get("last_check", "?"),
                                     "source": meta.get("source", "?"),
                                 })
@@ -499,7 +527,7 @@ class H(BaseHTTPRequestHandler):
                             matched_items.append({
                                 "ip": ip, "port": port,
                                 "protocol": proto, "delay": delay,
-                                "location": hd.get("location") or COUNTRY_NAME.get(country_code, country_code),
+                                "location": location_display(country_code, hd.get("location"), ip),
                                 "country": country_code, "last_check": hd.get("last_check", "?"),
                                 "source": hd.get("source", "?"),
                             })
