@@ -310,7 +310,7 @@ def validate_all(executor):
     print(f"[validate] checked={checked} skip={skipped} "
           f"S_direct={results['ok_s']} S_via_proxy={results['ok_via_proxy']} "
           f"fail={results['fail']} removed={results['removed']} "
-          f"slow={results['removed_slow']} total_S={results['S']}")
+          f"slow={results['slow']} total_S={results['S']}")
 
 # ── 采集 ──
 def harvest_new_proxies():
@@ -320,7 +320,7 @@ def harvest_new_proxies():
         if not os.path.exists(fetcher_path): return 0
         import subprocess
         result = subprocess.run(
-            [sys.executable, fetcher_path], capture_output=True, text=True, timeout=300,
+            [sys.executable, fetcher_path], capture_output=True, text=True, timeout=600,
             env={**os.environ, "REDIS_HOST": os.environ.get("REDIS_HOST", "proxy-redis")}
         )
         if result.returncode != 0: print(f"[harvest] exit={result.returncode}")

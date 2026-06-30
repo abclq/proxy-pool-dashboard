@@ -8,7 +8,8 @@ import urllib.request, json, time, re, sys, os, ssl, random
 
 # ── Redis 连接 ──
 import redis as redis_lib
-REDIS = redis_lib.Redis(host="proxy-redis", port=6379, db=1, decode_responses=True,
+REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
+REDIS = redis_lib.Redis(host=REDIS_HOST, port=6379, db=1, decode_responses=True,
                          socket_connect_timeout=5, socket_timeout=5)
 
 KEY_POOL = "proxies:pool"
@@ -71,30 +72,8 @@ def add_proxy(proxy_str, source, protocol="http"):
     if not protocol or protocol.lower() in ("unknown", "", "?"):
         return False
 
-    # ── 入库前快速验证：HTTP 直连 <500ms 才收 ──
-    latency = None
-    try:
-        import socket as _sock
-        with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
-            s.settimeout(3.0)
-            t0 = time.time()
-            s.connect((ip, pnum))
-            s.send(f"GET http://www.qq.com/ HTTP/1.1\r\nHost: www.qq.com\r\nConnection: close\r\n\r\n".encode())
-            data = b""
-            while True:
-                try:
-                    chunk = s.recv(4096)
-                    if not chunk: break
-                    data += chunk
-                except: break
-            if data and (b"HTTP/" in data or len(data) > 100):
-                latency = int((time.time() - t0) * 1000)
-    except:
-        pass
-
-    if latency is None or latency <= 0 or latency >= 500:
-        return False  # 慢/死代理直接丢弃
-    # ──────────────────────────────────────────────
+    # ── 不做连接验证，直接入库（validator 会全量验证并设真实延迟）──
+    latency = 0
 
     geo_str, is_cn = geo_lookup(ip)
     geo_parts = geo_str.split("|")
@@ -551,42 +530,42 @@ if __name__ == "__main__":
     total = 0
 
     # API 源
-    total += fetch_proxyscrape()
-    total += fetch_docip()
-    total += fetch_89ip()
+    n = fetch_proxyscrape(); print(f"  proxyscrape: +{n}", flush=True); total += n
+    n = fetch_docip(); print(f"  docip: +{n}", flush=True); total += n
+    n = fetch_89ip(); print(f"  89ip: +{n}", flush=True); total += n
 
     # GitHub 文本列表
-    total += fetch_text_list("clarketm",
+    n = fetch_text_list("clarketm",
         "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
-        "clarketm")
-    total += fetch_text_list("hookzof/socks5",
+        "clarketm"); print(f"  clarketm: +{n}", flush=True); total += n
+    n = fetch_text_list("hookzof/socks5",
         "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
-        "hookzof")
+        "hookzof"); print(f"  hookzof: +{n}", flush=True); total += n
 
     # HTML 表格页面
-    total += fetch_proxy_table("Free-Proxy-List", "https://free-proxy-list.net/", "free-proxy-list")
-    total += fetch_proxy_table("SSLProxies", "https://www.sslproxies.org/", "sslproxies")
-    total += fetch_proxy_table("US-Proxy", "https://www.us-proxy.org/", "us-proxy")
-    total += fetch_proxy_table("Socks-Proxy", "https://www.socks-proxy.net/", "socks-proxy")
+    n = fetch_proxy_table("Free-Proxy-List", "https://free-proxy-list.net/", "free-proxy-list"); print(f"  free-proxy-list: +{n}", flush=True); total += n
+    n = fetch_proxy_table("SSLProxies", "https://www.sslproxies.org/", "sslproxies"); print(f"  sslproxies: +{n}", flush=True); total += n
+    n = fetch_proxy_table("US-Proxy", "https://www.us-proxy.org/", "us-proxy"); print(f"  us-proxy: +{n}", flush=True); total += n
+    n = fetch_proxy_table("Socks-Proxy", "https://www.socks-proxy.net/", "socks-proxy"); print(f"  socks-proxy: +{n}", flush=True); total += n
 
     # 中国源
-    total += fetch_kuaidaili()
-    total += fetch_ip3366()
+    n = fetch_kuaidaili(); print(f"  kuaidaili: +{n}", flush=True); total += n
+    n = fetch_ip3366(); print(f"  ip3366: +{n}", flush=True); total += n
 
     # 国际大源（可能被墙，用代理轮换）
-    total += fetch_openproxylist()
-    total += fetch_murongpig()
-    total += fetch_vmheaven()
-    total += fetch_proxifly_gh()
-    total += fetch_jiliu()
-    total += fetch_qiyun()
-    total += fetch_vpslabcloud()
-    total += fetch_iplocate()
-    total += fetch_databay()
-    total += fetch_ercindededeoglu()
-    total += fetch_proxyscraper_repo()
-    total += fetch_anon1221()
-    total += fetch_hideip()
+    n = fetch_openproxylist(); print(f"  openproxylist: +{n}", flush=True); total += n
+    n = fetch_murongpig(); print(f"  murongpig: +{n}", flush=True); total += n
+    n = fetch_vmheaven(); print(f"  vmheaven: +{n}", flush=True); total += n
+    n = fetch_proxifly_gh(); print(f"  proxifly_gh: +{n}", flush=True); total += n
+    n = fetch_jiliu(); print(f"  jiliu: +{n}", flush=True); total += n
+    n = fetch_qiyun(); print(f"  qiyun: +{n}", flush=True); total += n
+    n = fetch_vpslabcloud(); print(f"  vpslabcloud: +{n}", flush=True); total += n
+    n = fetch_iplocate(); print(f"  iplocate: +{n}", flush=True); total += n
+    n = fetch_databay(); print(f"  databay: +{n}", flush=True); total += n
+    n = fetch_ercindededeoglu(); print(f"  ercindededeoglu: +{n}", flush=True); total += n
+    n = fetch_proxyscraper_repo(); print(f"  proxyscraper_repo: +{n}", flush=True); total += n
+    n = fetch_anon1221(); print(f"  anon1221: +{n}", flush=True); total += n
+    n = fetch_hideip(); print(f"  hideip: +{n}", flush=True); total += n
 
     elapsed = time.time() - start_time
     pool_size = REDIS.zcard(KEY_POOL)
