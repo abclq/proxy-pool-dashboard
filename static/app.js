@@ -130,7 +130,7 @@ function renderDetailTable(d) {
       const lat = p.delay > 0 ? p.delay + 'ms' : '-';
       const cls = p.delay < 200 ? 'fast' : p.delay < 350 ? 'mid' : '';
       return `<tr>
-        <td class="proxy-addr" onclick="copyAddr('${addr}')" title="点击复制">${addr}</td>
+        <td class="proxy-addr" onclick="copyAddr('${addr}', event)" title="点击复制">${addr}</td>
         <td><span class="proto-badge proto-${p.protocol}">${p.protocol.toUpperCase()}</span></td>
         <td class="lat-${cls}">${lat}</td>
         <td>${p.location || '-'}</td>
@@ -150,12 +150,12 @@ function renderDetailTable(d) {
   pager.innerHTML = html;
 }
 
-function copyAddr(addr) {
+function copyAddr(addr, evt) {
   navigator.clipboard.writeText(addr).then(() => {
     // Brief visual feedback
     const el = document.querySelector('.proxy-addr.copied');
     if (el) el.classList.remove('copied');
-    const clicked = event.target;
+    const clicked = (evt && evt.target) ? evt.target : document.querySelector(`[onclick*="${addr}"]`);
     clicked.classList.add('copied');
     setTimeout(() => clicked.classList.remove('copied'), 800);
   }).catch(() => {});

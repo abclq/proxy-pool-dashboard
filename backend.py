@@ -102,7 +102,11 @@ def jhao_map():
 def parse_member(member):
     try:
         ip, port = member.rsplit(":", 1)
-        if ip in BAD_IPS or not port.isdigit(): return None, None
+        if ip in BAD_IPS or not port.isdigit():
+            return None, None
+        port_num = int(port)
+        if not (1 <= port_num <= 65535):
+            return None, None
         return ip, port
     except Exception:
         return None, None
@@ -115,7 +119,7 @@ def safe_float(v, default=0.0):
         return default
 
 def grade_for_delay(delay):
-    if delay <= 0: return "d"
+    if delay is None or delay <= 0: return "?"
     if delay < 500: return "s"
     if delay < 1000: return "a"
     if delay < 3000: return "b"
@@ -149,7 +153,7 @@ def build_proxy(member, hd, jm):
     proto = (hd.get("protocol") or "").lower().strip()
     if not proto or proto == "unknown": proto = "https" if jd.get("https") else "?"
     return {"ip": ip, "port": port, "protocol": proto, "delay": delay,
-            "grade": grade_for_delay(delay), "region": normalize_country(country), "location": location,
+            "grade": grade_for_delay(delay), "region": normalize_country(country) or "?", "location": location,
             "source": hd.get("source") or jd.get("source", "?"),
             "anon": hd.get("anonymous") or jd.get("anonymous", "?"),
             "last_check": hd.get("last_check", "?"), "is_china": country == "CN"}
@@ -188,7 +192,7 @@ def index_ready():
 
 def ensure_index_async():
     global _index_building
-    if index_ready() or _index_building: return
+    if index_ready(): return
     with _index_lock:
         if _index_building or index_ready(): return
         _index_building = True
@@ -198,7 +202,9 @@ def build_indexes():
     global _index_building
     try:
         old = [k for k in r1.scan_iter("idx:country:*")] + [k for k in r1.scan_iter("idx:proto:*")] + [k for k in r1.scan_iter("idx:grade:*")]
-        if old: r1.delete(*old)
+        if old:
+            for i in range(0, len(old), 500):
+                r1.delete(*old[i:i+500])
         total = r1.zcard("proxies:pool"); batch = 1000
         for off in range(0, total, batch):
             members = r1.zrange("proxies:pool", off, off + batch - 1)
@@ -214,7 +220,7 @@ def build_indexes():
             w.execute()
         for k in list(r1.scan_iter("idx:country:*")) + list(r1.scan_iter("idx:proto:*")) + list(r1.scan_iter("idx:grade:*")):
             r1.expire(k, INDEX_TTL)
-        r1.setex("idx:ready", INDEX_TTL, "1")
+        r1.set("idx:ready", "1", ex=INDEX_TTL)
     except Exception as e:
         try: r1.setex("idx:error", 300, str(e))
         except Exception: pass
@@ -403,47 +409,95 @@ class H(BaseHTTPRequestHandler):
             loc_f = q.get("location", [""])[0].lower()
             search_f = q.get("search", [""])[0].lower()
 
-            # Scan for matching proxies (bounded)
             total = r1.zcard("proxies:pool")
-            matched_items = []; scanned = 0; batch = 2000
-            max_scan = min(total, 40000)
-            for off in range(0, max_scan, batch):
-                members = r1.zrange("proxies:pool", off, min(total - 1, off + batch - 1))
-                pipe = r1.pipeline(transaction=False)
-                for m in members: pipe.hgetall(f"proxy:{m}")
-                for m, hd in zip(members, pipe.execute()):
-                    scanned += 1
-                    if not hd: continue
-                    ip, _ = parse_member(m)
-                    if not ip: continue
-                    cc = normalize_country((hd.get("country") or hd.get("region") or "").strip()) or "?"
-                    if cc != country_code: continue
-                    proto = (hd.get("protocol") or "?").lower().strip()
-                    if proto_f and proto != proto_f: continue
-                    loc = (hd.get("location") or "").lower()
-                    if loc_f and loc_f not in loc: continue
-                    delay = safe_float(hd.get("latency") or hd.get("delay"), 0.0)
-                    if delay_f is not None and delay > delay_f: continue
-                    if search_f and search_f not in m: continue
-                    matched_items.append({
-                        "ip": ip, "port": hd.get("port", ""),
-                        "protocol": proto, "delay": delay,
-                        "location": hd.get("location") or COUNTRY_NAME.get(country_code, country_code),
-                        "country": cc, "last_check": hd.get("last_check", "?"),
-                        "source": hd.get("source", "?"),
-                    })
-                if scanned >= max_scan: break
+            matched_items = []
+            total_matched = 0
+            country_key = idx_key("country", country_code)
 
-            total_matched = len(matched_items)
-            if sort_by == "delay":
-                matched_items.sort(key=lambda x: x.get("delay") or 99999, reverse=not sort_asc)
-            start = (page - 1) * limit
-            page_items = matched_items[start:start + limit]
+            # Fast path: use Redis set index for country
+            if index_ready():
+                try:
+                    if r1.exists(country_key):
+                        candidate_count = r1.scard(country_key)
+                        # Paginate directly from set
+                        start = (page - 1) * limit
+                        members_batch = list(r1.sscan_iter(country_key, count=limit * 4))
+                        # Process all for total filtered count, collect page slice
+                        page_collected = 0; total_matched = 0; matched_batch = []
+                        for member in members_batch:
+                            meta = r1.hgetall(f"proxy:{member}")
+                            if not meta: continue
+                            ip, port = parse_member(member)
+                            if not ip or not port: continue
+                            proto = (meta.get("protocol") or "?").lower().strip()
+                            if proto_f and proto != proto_f: continue
+                            loc = (meta.get("location") or "").lower()
+                            if loc_f and loc_f not in loc: continue
+                            delay = safe_float(meta.get("latency") or meta.get("delay"), 0.0)
+                            if delay_f is not None and delay > delay_f: continue
+                            if search_f and search_f not in member: continue
+                            total_matched += 1
+                            if total_matched > start and page_collected < limit:
+                                matched_batch.append({
+                                    "ip": ip, "port": port,
+                                    "protocol": proto, "delay": delay,
+                                    "location": meta.get("location") or COUNTRY_NAME.get(country_code, country_code),
+                                    "country": country_code, "last_check": meta.get("last_check", "?"),
+                                    "source": meta.get("source", "?"),
+                                })
+                                page_collected += 1
+                        if sort_by == "delay":
+                            matched_batch.sort(key=lambda x: x.get("delay") or 99999, reverse=not sort_asc)
+                        matched_items = matched_batch
+                    else:
+                        total_matched = 0
+                except Exception:
+                    pass  # fall through to scan
+
+            # Fallback: scan (when index not ready or country key missing)
+            if not matched_items and (not index_ready() or not r1.exists(country_key)):
+                total_matched = 0
+                scanned = 0; batch = 2000
+                max_scan = min(total, 40000)
+                start = (page - 1) * limit
+                page_collected = 0
+                for off in range(0, max_scan, batch):
+                    members = r1.zrange("proxies:pool", off, min(total - 1, off + batch - 1))
+                    pipe = r1.pipeline(transaction=False)
+                    for m in members: pipe.hgetall(f"proxy:{m}")
+                    for m, hd in zip(members, pipe.execute()):
+                        scanned += 1
+                        if not hd: continue
+                        ip, port = parse_member(m)
+                        if not ip or not port: continue
+                        cc = normalize_country((hd.get("country") or hd.get("region") or "").strip()) or "?"
+                        if cc != country_code: continue
+                        proto = (hd.get("protocol") or "?").lower().strip()
+                        if proto_f and proto != proto_f: continue
+                        loc = (hd.get("location") or "").lower()
+                        if loc_f and loc_f not in loc: continue
+                        delay = safe_float(hd.get("latency") or hd.get("delay"), 0.0)
+                        if delay_f is not None and delay > delay_f: continue
+                        if search_f and search_f not in m: continue
+                        total_matched += 1
+                        if total_matched > start and page_collected < limit:
+                            matched_items.append({
+                                "ip": ip, "port": port,
+                                "protocol": proto, "delay": delay,
+                                "location": hd.get("location") or COUNTRY_NAME.get(country_code, country_code),
+                                "country": country_code, "last_check": hd.get("last_check", "?"),
+                                "source": hd.get("source", "?"),
+                            })
+                            page_collected += 1
+                    if scanned >= max_scan: break
+                if sort_by == "delay":
+                    matched_items.sort(key=lambda x: x.get("delay") or 99999, reverse=not sort_asc)
+
             body = {
                 "country": country_code, "country_name": COUNTRY_NAME.get(country_code, country_code),
                 "total_matched": total_matched, "page": page,
                 "pages": max(1, -(-total_matched // limit)),
-                "limit": limit, "proxies": page_items,
+                "limit": limit, "proxies": matched_items,
             }
             self._json(body)
             return
