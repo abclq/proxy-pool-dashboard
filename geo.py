@@ -15,7 +15,13 @@ import urllib.error
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "proxy-redis")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
-_r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=1, decode_responses=True)
+_r = None
+
+def _redis():
+    global _r
+    if _r is None:
+        _r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=1, decode_responses=True)
+    return _r
 
 GEO_TTL = 7 * 24 * 3600
 FILL_INTERVAL = 600
@@ -117,23 +123,24 @@ def _local_lookup(ip_str):
     """Binary search for country code. Returns 'ZZ' if not found."""
     if not _local_db["loaded"]:
         _load_local_db()
-    entries = _local_db["entries"]
-    if not entries:
-        return "ZZ"
-    try:
-        target = struct.unpack("!I", socket.inet_aton(ip_str))[0]
-    except Exception:
-        return "ZZ"
-    lo, hi = 0, len(entries) - 1
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        s, e, c = entries[mid]
-        if target < s:
-            hi = mid - 1
-        elif target > e:
-            lo = mid + 1
-        else:
-            return c
+    with _local_db["lock"]:
+        entries = _local_db["entries"]
+        if not entries:
+            return "ZZ"
+        try:
+            target = struct.unpack("!I", socket.inet_aton(ip_str))[0]
+        except Exception:
+            return "ZZ"
+        lo, hi = 0, len(entries) - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            s, e, c = entries[mid]
+            if target < s:
+                hi = mid - 1
+            elif target > e:
+                lo = mid + 1
+            else:
+                return c
     return "ZZ"
 
 
@@ -243,8 +250,8 @@ def resolve(ip, update_proxy_hashes=False):
 
 def _sync_location_to_proxies(ip, location):
     try:
-        for k in _r.scan_iter(f"proxy:{ip}:*", count=100):
-            _r.hset(k, "location", location)
+        for k in _redis().scan_iter(f"proxy:{ip}:*", count=100):
+            _redis().hset(k, "location", location)
     except Exception:
         pass
 
@@ -370,7 +377,7 @@ def _format_location(data):
         ip_addr = data.get("query", "")
         if ip_addr:
             try:
-                _r.delete(f"geo:{ip_addr}")
+                _redis().delete(f"geo:{ip_addr}")
             except Exception:
                 pass
             _enqueue_ip(ip_addr)
@@ -382,7 +389,7 @@ def _cached(ip):
     if not ip or ip in ("0.0.0.0", "127.0.0.1"):
         return None
     try:
-        raw = _r.get(f"geo:{ip}")
+        raw = _redis().get(f"geo:{ip}")
         return json.loads(raw) if raw else None
     except Exception:
         return None
@@ -392,7 +399,7 @@ def _store(ip, data):
     if not ip or data is None:
         return
     data["geo_updated_at"] = int(time.time())
-    _r.setex(f"geo:{ip}", GEO_TTL, json.dumps(data, ensure_ascii=False))
+    _redis().setex(f"geo:{ip}", GEO_TTL, json.dumps(data, ensure_ascii=False))
 
 
 def _write_proxy_geo(proxy_key, data):
@@ -413,7 +420,7 @@ def _write_proxy_geo(proxy_key, data):
             else:
                 return
         loc = _format_location(data)
-        _r.hset(f"proxy:{proxy_key}", mapping={
+        _redis().hset(f"proxy:{proxy_key}", mapping={
             "country": cc,
             "location": loc,
             "geo_updated_at": str(int(time.time())),
@@ -426,7 +433,7 @@ def _write_proxy_geo(proxy_key, data):
 def _enqueue_ip(ip):
     try:
         if ip and ip not in ("0.0.0.0", "127.0.0.1"):
-            _r.sadd("geo:queue", ip)
+            _redis().sadd("geo:queue", ip)
     except Exception:
         pass
 
@@ -438,10 +445,10 @@ def _load_proxy_pool():
     proxies = []
     try:
         # 取分数最高的一批，优先 HTTP。免费代理不稳定，多备一些。
-        for m in _r.zrevrange("proxies:pool", 0, 499):
+        for m in _redis().zrevrange("proxies:pool", 0, 499):
             if m.startswith(("0.0.0.0:", "127.0.0.1:")):
                 continue
-            hd = _r.hgetall(f"proxy:{m}")
+            hd = _redis().hgetall(f"proxy:{m}")
             proto = (hd.get("protocol") or "http").lower()
             if proto in ("http", "https", "?"):
                 proxies.append(m)
@@ -476,24 +483,27 @@ def _open_url(req, timeout=HTTP_TIMEOUT):
 def _query_batch(ips):
     if not ips:
         return []
-    payload = json.dumps([{"query": ip} for ip in ips]).encode()
-    req = urllib.request.Request(
-        "http://ip-api.com/batch?lang=zh-CN&fields=status,message,country,countryCode,regionName,city,query",
-        data=payload,
-        headers={"Content-Type": "application/json", "User-Agent": "proxy-dashboard/geo"},
-    )
-    raw = _open_url(req)
-    if not raw:
-        return []
-    try:
-        arr = json.loads(raw.decode("utf-8", errors="ignore"))
-    except Exception:
-        return []
     out = []
-    for item in arr:
-        if item.get("status") == "success":
-            item["source"] = "ip-api"
-            out.append(item)
+    # ip-api.com free tier limit: 100 IPs per batch request
+    for i in range(0, len(ips), 100):
+        chunk = ips[i:i + 100]
+        payload = json.dumps([{"query": ip} for ip in chunk]).encode()
+        req = urllib.request.Request(
+            "http://ip-api.com/batch?lang=zh-CN&fields=status,message,country,countryCode,regionName,city,query",
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "proxy-dashboard/geo"},
+        )
+        raw = _open_url(req)
+        if not raw:
+            continue
+        try:
+            arr = json.loads(raw.decode("utf-8", errors="ignore"))
+        except Exception:
+            continue
+        for item in arr:
+            if item.get("status") == "success":
+                item["source"] = "ip-api"
+                out.append(item)
     return out
 
 
@@ -680,13 +690,13 @@ def _fill_cycle(cn_only=False):
     # 1. Queue first
     try:
         while len(ips) < batch:
-            ip = _r.spop("geo:queue")
+            ip = _redis().spop("geo:queue")
             if not ip:
                 break
             if _needs_refresh(ip):
                 cc = _local_lookup(ip)
                 if cn_only and cc != "CN":
-                    _r.sadd("geo:queue", ip)  # Put back for regular cycle
+                    _redis().sadd("geo:queue", ip)  # Put back for regular cycle
                     continue
                 ips.append(ip)
     except Exception:
@@ -694,7 +704,7 @@ def _fill_cycle(cn_only=False):
     # 2. Scan pool for stale/missing
     if len(ips) < batch:
         try:
-            for m in _r.zscan_iter("proxies:pool", count=1000):
+            for m in _redis().zscan_iter("proxies:pool", count=1000):
                 key = m[0]
                 ip = key.rsplit(":", 1)[0] if ":" in key else key
                 if ip in ("0.0.0.0", "127.0.0.1"):
@@ -719,7 +729,7 @@ def _fill_cycle(cn_only=False):
     for ip in ips:
         if not _cached(ip):
             try:
-                _r.setex(f"geo:{ip}", 3600, json.dumps({"_placeholder": True, "query": ip, "geo_updated_at": int(time.time())}))
+                _redis().setex(f"geo:{ip}", 3600, json.dumps({"_placeholder": True, "query": ip, "geo_updated_at": int(time.time())}))
             except Exception:
                 pass
 
@@ -737,7 +747,7 @@ def enqueue_cn_ips():
     seen = set()
     count = 0
     try:
-        for m in _r.zscan_iter("proxies:pool", count=2000):
+        for m in _redis().zscan_iter("proxies:pool", count=2000):
             key = m[0]
             ip = key.rsplit(":", 1)[0] if ":" in key else key
             if ip in seen or ip in ("0.0.0.0", "127.0.0.1"):
@@ -745,7 +755,7 @@ def enqueue_cn_ips():
             cc = _local_lookup(ip)
             if cc == "CN":
                 seen.add(ip)
-                _r.sadd("geo:queue", ip)
+                _redis().sadd("geo:queue", ip)
                 count += 1
     except Exception as e:
         pass

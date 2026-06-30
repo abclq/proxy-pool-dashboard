@@ -4,10 +4,11 @@ let currentPage = 1;
 let countries = [];
 let allCountries = [];
 let debounceTimer = null;
+let abortController = null;
 
 // ── Init ──
 (async function init() {
-  document.getElementById('title').onclick = goBack;
+  document.getElementById('title').addEventListener('click', goBack);
   await loadStats();
   await loadCountries();
 })();
@@ -16,6 +17,7 @@ let debounceTimer = null;
 async function loadStats() {
   try {
     const r = await fetch('/api/stats');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     const bar = document.getElementById('stats-bar');
     bar.textContent = `共 ${d.total.toLocaleString()} 节点 · ${Object.keys(d.regions||{}).length} 个国家 · 仅展示 <500ms`;
@@ -26,6 +28,7 @@ async function loadStats() {
 async function loadCountries() {
   try {
     const r = await fetch('/api/countries');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     allCountries = d.countries || [];
     countries = [...allCountries];
@@ -54,23 +57,46 @@ function renderCountries() {
     grid.innerHTML = '<p style="text-align:center;color:#888">无匹配国家</p>';
     return;
   }
-  grid.innerHTML = countries.map(c => {
+  grid.innerHTML = '';
+  countries.forEach(c => {
     const flag = flagEmoji(c.code);
-    return `<div class="country-card" onclick="drillInto('${c.code}','${c.name.replace(/'/g,"\\'")}')">
-      <span class="country-flag">${flag}</span>
-      <span class="country-name">${c.name}</span>
-      <span class="country-count">${c.count.toLocaleString()}</span>
-    </div>`;
-  }).join('');
+    const card = document.createElement('div');
+    card.className = 'country-card';
+    card.dataset.code = c.code;
+    card.dataset.name = c.name;
+    card.addEventListener('click', function() {
+      drillInto(this.dataset.code, this.dataset.name);
+    });
+    const flagSpan = document.createElement('span');
+    flagSpan.className = 'country-flag';
+    flagSpan.textContent = flag;
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'country-name';
+    nameSpan.textContent = c.name;
+    const countSpan = document.createElement('span');
+    countSpan.className = 'country-count';
+    countSpan.textContent = c.count.toLocaleString();
+    card.appendChild(flagSpan);
+    card.appendChild(nameSpan);
+    card.appendChild(countSpan);
+    grid.appendChild(card);
+  });
 }
 
 // ── Drill ──
 function drillInto(code, name) {
+  clearTimeout(debounceTimer);
   currentCountry = code;
   currentPage = 1;
   document.getElementById('view-country-list').style.display = 'none';
   document.getElementById('view-country-detail').style.display = 'block';
   document.getElementById('detail-title').textContent = `${flagEmoji(code)} ${name || code}`;
+  // Reset filter inputs
+  document.getElementById('f-proto').value = '';
+  document.getElementById('f-location').value = '';
+  document.getElementById('f-delay').value = '';
+  document.getElementById('f-search').value = '';
+  document.getElementById('f-sort').value = '';
   // Populate protocol filter
   const protoSel = document.getElementById('f-proto');
   protoSel.innerHTML = '<option value="">全部协议</option>' +
@@ -79,6 +105,7 @@ function drillInto(code, name) {
 }
 
 function goBack() {
+  clearTimeout(debounceTimer);
   currentCountry = null;
   document.getElementById('view-country-list').style.display = 'block';
   document.getElementById('view-country-detail').style.display = 'none';
@@ -107,13 +134,26 @@ async function loadDetail(page) {
   if (search) params.set('search', search);
   if (sort) { const [by, dir] = sort.split('-'); params.set('sort', by); params.set('asc', dir === 'asc' ? '1' : '0'); }
 
+  // Abort previous request
+  if (abortController) { abortController.abort(); }
+  abortController = new AbortController();
+
   try {
-    const r = await fetch(`/api/country/${currentCountry}?${params}`);
+    const r = await fetch(`/api/country/${currentCountry}?${params}`, { signal: abortController.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     renderDetailTable(d);
   } catch(e) {
-    document.getElementById('detail-tbody').innerHTML = '<tr><td colspan="5" style="color:#888">加载失败</td></tr>';
+    if (e.name !== 'AbortError') {
+      document.getElementById('detail-tbody').innerHTML = '<tr><td colspan="5" style="color:#888">加载失败</td></tr>';
+    }
   }
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
 }
 
 function renderDetailTable(d) {
@@ -122,32 +162,82 @@ function renderDetailTable(d) {
 
   const proxies = d.proxies || [];
   const tbody = document.getElementById('detail-tbody');
+  tbody.innerHTML = '';
+
   if (!proxies.length) {
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#888">无代理</td></tr>';
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 5;
+    td.style.textAlign = 'center';
+    td.style.color = '#888';
+    td.textContent = '无代理';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
   } else {
-    tbody.innerHTML = proxies.map(p => {
+    proxies.forEach(p => {
       const addr = `${p.ip}:${p.port}`;
       const lat = p.delay > 0 ? p.delay + 'ms' : '-';
       const cls = p.delay < 200 ? 'fast' : p.delay < 350 ? 'mid' : '';
-      return `<tr>
-        <td class="proxy-addr" onclick="copyAddr('${addr}', event)" title="点击复制">${addr}</td>
-        <td><span class="proto-badge proto-${p.protocol}">${p.protocol.toUpperCase()}</span></td>
-        <td class="lat-${cls}">${lat}</td>
-        <td>${p.location || '-'}</td>
-        <td class="time-col">${p.last_check || '-'}</td>
-      </tr>`;
-    }).join('');
+
+      const tr = document.createElement('tr');
+
+      const tdAddr = document.createElement('td');
+      tdAddr.className = 'proxy-addr';
+      tdAddr.textContent = addr;
+      tdAddr.title = '点击复制';
+      tdAddr.addEventListener('click', function(e) { copyAddr(addr, e); });
+
+      const tdProto = document.createElement('td');
+      const protoBadge = document.createElement('span');
+      protoBadge.className = 'proto-badge proto-' + (p.protocol || 'http');
+      protoBadge.textContent = (p.protocol || 'HTTP').toUpperCase();
+      tdProto.appendChild(protoBadge);
+
+      const tdLat = document.createElement('td');
+      if (cls) tdLat.className = 'lat-' + cls;
+      tdLat.textContent = lat;
+
+      const tdLoc = document.createElement('td');
+      tdLoc.textContent = p.location || '-';
+
+      const tdTime = document.createElement('td');
+      tdTime.className = 'time-col';
+      tdTime.textContent = p.last_check || '-';
+
+      tr.appendChild(tdAddr);
+      tr.appendChild(tdProto);
+      tr.appendChild(tdLat);
+      tr.appendChild(tdLoc);
+      tr.appendChild(tdTime);
+      tbody.appendChild(tr);
+    });
   }
 
   // Pager
   const pager = document.getElementById('detail-pager');
   if (d.pages <= 1) { pager.innerHTML = ''; return; }
-  let html = `<button ${d.page<=1?'disabled':''} onclick="loadDetail(${d.page-1})">‹</button>`;
-  for (let i = Math.max(1, d.page - 3); i <= Math.min(d.pages, d.page + 3); i++) {
-    html += `<button class="${i===d.page?'active':''}" onclick="loadDetail(${i})">${i}</button>`;
+  pager.innerHTML = '';
+  {
+    const prevBtn = document.createElement('button');
+    prevBtn.textContent = '‹';
+    if (d.page <= 1) prevBtn.disabled = true;
+    else prevBtn.addEventListener('click', () => loadDetail(d.page - 1));
+    pager.appendChild(prevBtn);
   }
-  html += `<button ${d.page>=d.pages?'disabled':''} onclick="loadDetail(${d.page+1})">›</button>`;
-  pager.innerHTML = html;
+  for (let i = Math.max(1, d.page - 3); i <= Math.min(d.pages, d.page + 3); i++) {
+    const btn = document.createElement('button');
+    btn.textContent = i;
+    if (i === d.page) btn.className = 'active';
+    btn.addEventListener('click', function() { loadDetail(parseInt(this.textContent)); });
+    pager.appendChild(btn);
+  }
+  {
+    const nextBtn = document.createElement('button');
+    nextBtn.textContent = '›';
+    if (d.page >= d.pages) nextBtn.disabled = true;
+    else nextBtn.addEventListener('click', () => loadDetail(d.page + 1));
+    pager.appendChild(nextBtn);
+  }
 }
 
 function copyAddr(addr, evt) {
@@ -155,8 +245,10 @@ function copyAddr(addr, evt) {
     // Brief visual feedback
     const el = document.querySelector('.proxy-addr.copied');
     if (el) el.classList.remove('copied');
-    const clicked = (evt && evt.target) ? evt.target : document.querySelector(`[onclick*="${addr}"]`);
-    clicked.classList.add('copied');
-    setTimeout(() => clicked.classList.remove('copied'), 800);
+    const clicked = evt && evt.target ? evt.target.closest('.proxy-addr') : null;
+    if (clicked) {
+      clicked.classList.add('copied');
+      setTimeout(() => clicked.classList.remove('copied'), 800);
+    }
   }).catch(() => {});
 }

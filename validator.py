@@ -132,13 +132,12 @@ def _pick_test_routes():
 
 def _http_test_via_proxy(ip, port, via_proxy=None):
     """通过中间代理 via_proxy 测试目标代理 ip:port"""
+    if via_proxy is None:
+        via_proxy = OVERSEAS_PROXY
     try:
         via_ip, via_port = via_proxy.split(":", 1)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(VALIDATE_TIMEOUT + 5)
-            if via_proxy is None:
-                via_proxy = OVERSEAS_PROXY
-                via_ip, via_port = via_proxy.split(":", 1)
             t0 = time.time()
             s.connect((via_ip, int(via_port)))
             s.send(f"CONNECT {ip}:{port} HTTP/1.1\r\nHost: {ip}:{port}\r\n\r\n".encode())
@@ -332,19 +331,28 @@ def harvest_new_proxies():
     except Exception as e:
         print(f"[harvest] error: {e}"); return 0
 
+def _harvest_wrapper():
+    try:
+        added = harvest_new_proxies()
+        print(f"[engine] harvest done: +{added}")
+    except Exception as e:
+        print(f"[engine] harvest error: {e}")
+
 # ── 主循环 ──
 def main():
     print(f"[engine] start — pool={proxy_count()} (S<{S_LATENCY_MAX}ms only)")
     last_harvest = time.time()
+    harvest_thread = None
     executor = ThreadPoolExecutor(max_workers=VALIDATE_THREADS, thread_name_prefix="val")
     try:
         while True:
             try:
                 now = time.time()
                 if now - last_harvest > HARVEST_INTERVAL:
-                    added = harvest_new_proxies()
-                    print(f"[engine] harvest done: +{added}")
-                    last_harvest = now
+                    if harvest_thread is None or not harvest_thread.is_alive():
+                        harvest_thread = threading.Thread(target=_harvest_wrapper, daemon=True)
+                        harvest_thread.start()
+                        last_harvest = now
                 t0 = time.time()
                 validate_all(executor)
                 elapsed = time.time() - t0
@@ -355,7 +363,9 @@ def main():
                 print(f"[engine] error: {e}")
                 time.sleep(CHECK_INTERVAL)
     finally:
-        executor.shutdown(wait=False)
+        executor.shutdown(wait=True)
+        if harvest_thread and harvest_thread.is_alive():
+            harvest_thread.join(timeout=5)
 
 if __name__ == "__main__":
     main()

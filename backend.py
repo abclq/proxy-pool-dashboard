@@ -13,10 +13,12 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 HOST = os.environ.get("REDIS_HOST", "proxy-redis")
-r0 = redis.Redis(host=HOST, port=6379, db=0, decode_responses=True,
-                  socket_timeout=5, socket_connect_timeout=3)
-r1 = redis.Redis(host=HOST, port=6379, db=1, decode_responses=True,
-                  socket_timeout=5, socket_connect_timeout=3)
+_pool0 = redis.ConnectionPool(host=HOST, port=6379, db=0, decode_responses=True,
+                               socket_timeout=5, socket_connect_timeout=3)
+_pool1 = redis.ConnectionPool(host=HOST, port=6379, db=1, decode_responses=True,
+                               socket_timeout=5, socket_connect_timeout=3)
+r0 = redis.Redis(connection_pool=_pool0)
+r1 = redis.Redis(connection_pool=_pool1)
 PER_PAGE = 50
 MAX_LIMIT = 200
 CACHE_TTL = 60
@@ -217,7 +219,7 @@ def build_proxy(member, hd, jm):
     region = normalize_country(country)
     if not region or region == "?": return None  # 无效国家，跳过
     delay = safe_float(hd.get("latency") or hd.get("delay"), 0.0)
-    if delay <= 0 or delay >= 500: return None  # 只留 <500ms
+    if delay > 0 and delay >= 500: return None  # 跳过已知慢代理，保留未验证的 (delay=0)
     proto = (hd.get("protocol") or "").lower().strip()
     if not proto or proto == "unknown": proto = "https" if jd.get("https") else "?"
     return {"ip": ip, "port": port, "protocol": proto, "delay": delay,
@@ -260,7 +262,6 @@ def index_ready():
 
 def ensure_index_async():
     global _index_building
-    if index_ready(): return
     with _index_lock:
         if _index_building or index_ready(): return
         _index_building = True
@@ -385,54 +386,62 @@ class H(BaseHTTPRequestHandler):
             return
         if path == "/api/stats":
             total = r1.zcard("proxies:pool"); now = time.time()
+            # Double-check: quick check under lock, heavy compute outside
+            need_recalc = False
             with _stats_lock:
-                cached = _stats_cache["d"] if now - _stats_cache["t"] < 30 else None
-                if cached is None or cached.get("total") != total:
-                    if index_ready():
-                        try:
-                            grades = {g: r1.scard(idx_key("grade", g)) for g in ("s", "a", "b", "c", "d")}
-                            known_protos = ["http", "https", "socks4", "socks5"]
-                            protos = {k: r1.scard(idx_key("proto", k)) for k in known_protos}
-                            protos = {k: v for k, v in protos.items() if v > 0}
-                            region_keys = list(r1.scan_iter("idx:country:*", count=100))
-                            regions = {}
-                            if region_keys:
-                                pipe = r1.pipeline(transaction=False)
-                                for k in region_keys: pipe.scard(k)
-                                for k, v in zip(region_keys, pipe.execute()):
-                                    regions[k.split(":", 2)[2]] = v
-                            china = regions.get("CN", 0)
-                            sample = sum(grades.values())  # 只含 <500ms（build_proxy 已过滤）
-                            cached = {"total": sample if sample else total, "sample": sample, "grades": grades, "protocols": protos,
-                                      "china": china, "regions": dict(sorted(regions.items(), key=lambda x: -x[1])[:80]),
-                                      "index_ready": True, "stats_cached_at": int(now)}
-                            _stats_cache["d"] = cached; _stats_cache["t"] = now
-                        except Exception:
-                            pass
-                    if cached is None:
-                        ensure_index_async()
-                        grades = {"s":0,"a":0,"b":0,"c":0,"d":0}; protos = {}; regions = {}; china = 0; seen = 0
-                        batch = 5000
-                        for off in range(0, total, batch):
-                            members = r1.zrange("proxies:pool", off, min(total - 1, off + batch - 1))
+                cached = _stats_cache["d"]
+                if now - _stats_cache["t"] >= 30 or cached is None or cached.get("total") != total:
+                    need_recalc = True
+            if need_recalc and cached is None:
+                cached = None
+            if need_recalc:
+                if index_ready():
+                    try:
+                        grades = {g: r1.scard(idx_key("grade", g)) for g in ("s", "a", "b", "c", "d")}
+                        known_protos = ["http", "https", "socks4", "socks5"]
+                        protos = {k: r1.scard(idx_key("proto", k)) for k in known_protos}
+                        protos = {k: v for k, v in protos.items() if v > 0}
+                        region_keys = list(r1.scan_iter("idx:country:*", count=100))
+                        regions = {}
+                        if region_keys:
                             pipe = r1.pipeline(transaction=False)
-                            for m in members: pipe.hgetall(f"proxy:{m}")
-                            for m, hd in zip(members, pipe.execute()):
-                                if not parse_member(m)[0]: continue
-                                seen += 1
-                                delay = safe_float((hd or {}).get("latency") or (hd or {}).get("delay"), 0.0)
-                                if delay <= 0 or delay >= 500: continue  # 只统计 <500ms
-                                g = grade_for_delay(delay); grades[g] = grades.get(g, 0) + 1
-                                proto = ((hd or {}).get("protocol") or "?").lower().strip() or "?"
-                                if proto == "unknown": proto = "?"
-                                protos[proto] = protos.get(proto, 0) + 1
-                                country = normalize_country(((hd or {}).get("country") or (hd or {}).get("region") or "").strip())
-                                if not country or country == "?": continue  # 跳过无效国家
-                                regions[country] = regions.get(country, 0) + 1
-                                if country == "CN": china += 1
-                        cached = {"total": seen, "sample": seen, "grades": grades, "protocols": protos,
+                            for k in region_keys: pipe.scard(k)
+                            for k, v in zip(region_keys, pipe.execute()):
+                                regions[k.split(":", 2)[2]] = v
+                        china = regions.get("CN", 0)
+                        sample = sum(grades.values())
+                        cached = {"total": sample if sample else total, "sample": sample, "grades": grades, "protocols": protos,
                                   "china": china, "regions": dict(sorted(regions.items(), key=lambda x: -x[1])[:80]),
-                                  "index_ready": index_ready(), "stats_cached_at": int(now)}
+                                  "index_ready": True, "stats_cached_at": int(now)}
+                        with _stats_lock:
+                            _stats_cache["d"] = cached; _stats_cache["t"] = now
+                    except Exception:
+                        pass
+                if cached is None:
+                    ensure_index_async()
+                    grades = {"s":0,"a":0,"b":0,"c":0,"d":0}; protos = {}; regions = {}; china = 0; seen = 0
+                    batch = 5000
+                    for off in range(0, total, batch):
+                        members = r1.zrange("proxies:pool", off, min(total - 1, off + batch - 1))
+                        pipe = r1.pipeline(transaction=False)
+                        for m in members: pipe.hgetall(f"proxy:{m}")
+                        for m, hd in zip(members, pipe.execute()):
+                            if not parse_member(m)[0]: continue
+                            seen += 1
+                            delay = safe_float((hd or {}).get("latency") or (hd or {}).get("delay"), 0.0)
+                            if delay <= 0 or delay >= 500: continue
+                            g = grade_for_delay(delay); grades[g] = grades.get(g, 0) + 1
+                            proto = ((hd or {}).get("protocol") or "?").lower().strip() or "?"
+                            if proto == "unknown": proto = "?"
+                            protos[proto] = protos.get(proto, 0) + 1
+                            country = normalize_country(((hd or {}).get("country") or (hd or {}).get("region") or "").strip())
+                            if not country or country == "?": continue
+                            regions[country] = regions.get(country, 0) + 1
+                            if country == "CN": china += 1
+                    cached = {"total": seen, "sample": seen, "grades": grades, "protocols": protos,
+                              "china": china, "regions": dict(sorted(regions.items(), key=lambda x: -x[1])[:80]),
+                              "index_ready": index_ready(), "stats_cached_at": int(now)}
+                    with _stats_lock:
                         _stats_cache["d"] = cached; _stats_cache["t"] = now
             self._json(cached)
             return
@@ -491,36 +500,72 @@ class H(BaseHTTPRequestHandler):
                 try:
                     if r1.exists(country_key):
                         candidate_count = r1.scard(country_key)
-                        # Paginate directly from set
-                        start = (page - 1) * limit
-                        members_batch = list(r1.sscan_iter(country_key, count=limit * 4))
-                        # Process all for total filtered count, collect page slice
-                        page_collected = 0; total_matched = 0; matched_batch = []
-                        for member in members_batch:
-                            meta = r1.hgetall(f"proxy:{member}")
-                            if not meta: continue
-                            ip, port = parse_member(member)
-                            if not ip or not port: continue
-                            proto = (meta.get("protocol") or "?").lower().strip()
-                            if proto_f and proto != proto_f: continue
-                            loc = (meta.get("location") or "").lower()
-                            if loc_f and loc_f not in loc: continue
-                            delay = safe_float(meta.get("latency") or meta.get("delay"), 0.0)
-                            if delay_f is not None and delay > delay_f: continue
-                            if search_f and search_f not in member: continue
-                            total_matched += 1
-                            if total_matched > start and page_collected < limit:
-                                matched_batch.append({
+                        # For small countries: scan all, sort, paginate
+                        if candidate_count <= 1000:
+                            all_members = []
+                            # Exhaust sscan_iter cursor for completeness
+                            cursor = 0
+                            while True:
+                                cursor, batch = r1.sscan(country_key, cursor, count=200)
+                                all_members.extend(batch)
+                                if cursor == 0:
+                                    break
+                            # Fetch and filter all
+                            all_matched = []
+                            for member in all_members:
+                                meta = r1.hgetall(f"proxy:{member}")
+                                if not meta: continue
+                                ip, port = parse_member(member)
+                                if not ip or not port: continue
+                                proto = (meta.get("protocol") or "?").lower().strip()
+                                if proto_f and proto != proto_f: continue
+                                loc = (meta.get("location") or "").lower()
+                                if loc_f and loc_f not in loc: continue
+                                delay = safe_float(meta.get("latency") or meta.get("delay"), 0.0)
+                                if delay_f is not None and delay > delay_f: continue
+                                if search_f and search_f not in member: continue
+                                all_matched.append({
                                     "ip": ip, "port": port,
                                     "protocol": proto, "delay": delay,
                                     "location": location_display(country_code, meta.get("location"), ip),
                                     "country": country_code, "last_check": meta.get("last_check", "?"),
                                     "source": meta.get("source", "?"),
                                 })
-                                page_collected += 1
-                        if sort_by == "delay":
-                            matched_batch.sort(key=lambda x: x.get("delay") or 99999, reverse=not sort_asc)
-                        matched_items = matched_batch
+                            if sort_by == "delay":
+                                all_matched.sort(key=lambda x: x.get("delay") or 99999, reverse=not sort_asc)
+                            total_matched = len(all_matched)
+                            start = (page - 1) * limit
+                            matched_items = all_matched[start:start + limit]
+                        else:
+                            # Large country: paginate from set (排序为近似结果)
+                            start = (page - 1) * limit
+                            members_batch = list(r1.sscan_iter(country_key, count=limit * 4))
+                            page_collected = 0; total_matched = 0; matched_batch = []
+                            for member in members_batch:
+                                meta = r1.hgetall(f"proxy:{member}")
+                                if not meta: continue
+                                ip, port = parse_member(member)
+                                if not ip or not port: continue
+                                proto = (meta.get("protocol") or "?").lower().strip()
+                                if proto_f and proto != proto_f: continue
+                                loc = (meta.get("location") or "").lower()
+                                if loc_f and loc_f not in loc: continue
+                                delay = safe_float(meta.get("latency") or meta.get("delay"), 0.0)
+                                if delay_f is not None and delay > delay_f: continue
+                                if search_f and search_f not in member: continue
+                                total_matched += 1
+                                if total_matched > start and page_collected < limit:
+                                    matched_batch.append({
+                                        "ip": ip, "port": port,
+                                        "protocol": proto, "delay": delay,
+                                        "location": location_display(country_code, meta.get("location"), ip),
+                                        "country": country_code, "last_check": meta.get("last_check", "?"),
+                                        "source": meta.get("source", "?"),
+                                    })
+                                    page_collected += 1
+                            if sort_by == "delay":
+                                matched_batch.sort(key=lambda x: x.get("delay") or 99999, reverse=not sort_asc)
+                            matched_items = matched_batch
                     else:
                         total_matched = 0
                 except Exception:

@@ -4,13 +4,27 @@
 来源：ProxyScrape, docip, 89ip, clarketm, Thordata, hookzof,
       Free-Proxy-List 系列, 快代理, ip3366, MuRongPIG, OpenProxyList, VMHeaven 等
 """
-import urllib.request, json, time, re, sys, os, ssl, random
+import urllib.request, json, time, re, sys, os, ssl, random, threading
 
 # ── Redis 连接 ──
 import redis as redis_lib
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
-REDIS = redis_lib.Redis(host=REDIS_HOST, port=6379, db=1, decode_responses=True,
-                         socket_connect_timeout=5, socket_timeout=5)
+REDIS = None
+
+def _get_redis():
+    global REDIS
+    if REDIS is None:
+        for attempt in range(3):
+            try:
+                REDIS = redis_lib.Redis(host=REDIS_HOST, port=6379, db=1, decode_responses=True,
+                                        socket_connect_timeout=5, socket_timeout=5)
+                REDIS.ping()
+                break
+            except Exception:
+                if attempt == 2:
+                    raise
+                time.sleep(2)
+    return REDIS
 
 KEY_POOL = "proxies:pool"
 PFX_PROXY = "proxy:"
@@ -56,7 +70,7 @@ def geo_lookup(ip):
 
 def add_proxy(proxy_str, source, protocol="http"):
     """添加代理到 Redis，入库前快速验证延迟，只留 <500ms。"""
-    if REDIS.zscore(KEY_POOL, proxy_str) is not None:
+    if _get_redis().zscore(KEY_POOL, proxy_str) is not None:
         return False  # 已存在
 
     parts = proxy_str.split(":")
@@ -74,11 +88,18 @@ def add_proxy(proxy_str, source, protocol="http"):
 
     # ── TCP 连通性测试（只采活源）
     import socket as sock_mod
+    import logging
     try:
         s = sock_mod.socket(sock_mod.AF_INET, sock_mod.SOCK_STREAM)
         s.settimeout(2)
         s.connect((ip, pnum))
         s.close()
+    except sock_mod.timeout:
+        logging.debug(f"TCP timeout: {proxy_str}")
+        return False
+    except ConnectionRefusedError:
+        logging.debug(f"TCP refused: {proxy_str}")
+        return False
     except Exception:
         return False
 
@@ -91,7 +112,7 @@ def add_proxy(proxy_str, source, protocol="http"):
     city = geo_parts[2] if len(geo_parts) > 2 else "unknown"
 
     # pipeline 事务：zadd + hset 原子执行
-    pipe = REDIS.pipeline(transaction=True)
+    pipe = _get_redis().pipeline(transaction=True)
     pipe.zadd(KEY_POOL, {proxy_str: 20})
     pipe.hset(f"{PFX_PROXY}{proxy_str}", mapping={
         "ip": ip, "port": port, "protocol": protocol,
@@ -104,22 +125,25 @@ def add_proxy(proxy_str, source, protocol="http"):
 # ── 代理池（用自己池子反爬被墙源） ──
 PROXY_CACHE = []
 PROXY_CACHE_TS = 0
+_proxy_cache_lock = threading.Lock()
 
 def _load_proxies():
     global PROXY_CACHE, PROXY_CACHE_TS
     now = time.time()
-    if now - PROXY_CACHE_TS < 60 and PROXY_CACHE:
-        return
+    with _proxy_cache_lock:
+        if now - PROXY_CACHE_TS < 60 and PROXY_CACHE:
+            return
     PROXY_CACHE = []
     try:
-        members = REDIS.zrange(KEY_POOL, 0, 200)
+        members = _get_redis().zrange(KEY_POOL, 0, 200)
         if not members:
             return
         # pipeline 批量 HGETALL — 1 次往返替代 N 次 HGET
-        pipe = REDIS.pipeline(transaction=False)
+        pipe = _get_redis().pipeline(transaction=False)
         for m in members:
             pipe.hgetall(PFX_PROXY + m)
         metas = pipe.execute()
+        new_cache = []
         for m, meta in zip(members, metas):
             proto = (meta or {}).get(b"protocol", b"") if isinstance(meta, dict) else b""
             if isinstance(proto, bytes):
@@ -128,10 +152,12 @@ def _load_proxies():
             if isinstance(lat, bytes):
                 lat = lat.decode()
             if "http" in proto and lat.isdigit() and int(lat) > 0:
-                PROXY_CACHE.append(m)
+                new_cache.append(m)
+        with _proxy_cache_lock:
+            PROXY_CACHE = new_cache
+            PROXY_CACHE_TS = now
     except Exception:
         pass
-    PROXY_CACHE_TS = now
 
 def fetch(url, timeout=12, json_response=False, use_proxy=False):
     ctx = ssl.create_default_context()
@@ -157,12 +183,14 @@ def fetch(url, timeout=12, json_response=False, use_proxy=False):
 
     # try with proxy — 并行试前 5 个代理，第一个成功即返回
     _load_proxies()
-    if not PROXY_CACHE:
-        return None
+    with _proxy_cache_lock:
+        if not PROXY_CACHE:
+            return None
+        cache_copy = list(PROXY_CACHE)
 
     import concurrent.futures as cf
-    random.shuffle(PROXY_CACHE)
-    candidates = PROXY_CACHE[:5]  # 并行试 5 个
+    random.shuffle(cache_copy)
+    candidates = cache_copy[:5]  # 并行试 5 个
     with cf.ThreadPoolExecutor(max_workers=min(3, len(candidates))) as px:
         futures = {px.submit(_do_fetch, p): p for p in candidates}
         for f in cf.as_completed(futures):
@@ -577,7 +605,7 @@ if __name__ == "__main__":
     n = fetch_hideip(); print(f"  hideip: +{n}", flush=True); total += n
 
     elapsed = time.time() - start_time
-    pool_size = REDIS.zcard(KEY_POOL)
+    pool_size = _get_redis().zcard(KEY_POOL)
     print(f"\n{'='*50}")
     print(f"完成: +{total} 新代理 | 池总量: {pool_size} | 耗时: {elapsed:.1f}s")
     print(f"{'='*50}")
