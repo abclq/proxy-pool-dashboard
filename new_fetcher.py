@@ -91,7 +91,7 @@ def add_proxy(proxy_str, source, protocol="http"):
     import logging
     try:
         s = sock_mod.socket(sock_mod.AF_INET, sock_mod.SOCK_STREAM)
-        s.settimeout(2)
+        s.settimeout(0.05)
         s.connect((ip, pnum))
         s.close()
     except sock_mod.timeout:
@@ -145,12 +145,24 @@ def _load_proxies():
         metas = pipe.execute()
         new_cache = []
         for m, meta in zip(members, metas):
-            proto = (meta or {}).get(b"protocol", b"") if isinstance(meta, dict) else b""
+            proto = (meta or {}).get("protocol", "") if isinstance(meta, dict) else ""
             if isinstance(proto, bytes):
                 proto = proto.decode()
-            lat = (meta or {}).get(b"latency", b"0") if isinstance(meta, dict) else "0"
+            lat = (meta or {}).get("latency", "0") if isinstance(meta, dict) else "0"
             if isinstance(lat, bytes):
                 lat = lat.decode()
+            # validator writes 'delay' (float), fetcher writes 'latency' — support both
+            if not lat or not lat.isdigit() or int(lat) <= 0:
+                delay = (meta or {}).get("delay", "0") if isinstance(meta, dict) else "0"
+                if isinstance(delay, bytes):
+                    delay = delay.decode()
+                if delay:
+                    try:
+                        dl = int(float(delay))
+                        if dl > 0:
+                            lat = str(dl)
+                    except Exception:
+                        pass
             if "http" in proto and lat.isdigit() and int(lat) > 0:
                 new_cache.append(m)
         with _proxy_cache_lock:
