@@ -1,41 +1,58 @@
-# Proxy Pool Dashboard v2
+# Proxy Pool Dashboard
 
 [![Docker](https://img.shields.io/badge/Docker-✓-2496ED)](https://docker.com)
 [![Python](https://img.shields.io/badge/Python-3.13-blue)](https://python.org)
 [![Redis](https://img.shields.io/badge/Redis-7-red)](https://redis.io)
 
-基于代理采集引擎的自定义 **评分/路由/面板一体化** 管理工具。支持采集过滤、五级评分、离线 IP 地理定位、实时前端筛选，158k+ 代理池规模。
+高质量代理池采集/验证/Geo定位/展示一体化系统。**只保留 <500ms 代理**，慢代理直接删除，不做分层。
 
 ## ✨ 核心功能
 
 | 功能 | 说明 |
 |------|------|
-| 采集源 | **35** 源（20 GitHub + 15 爬虫/API），采集阶段过滤缺端口/协议的死数据 |
-| 五级评分 | **S/A/B/C/D**，基于延迟：S<500ms / A<1s / B<3s / C<5s / D≥5s 或失败 |
-| 离线 GeoIP | **DB-IP Country Lite** 二进制库（355K 条，3.5MB），3.6μs/查，零 API 限流 |
-| 粘性会话 | 同目标站点复用同一代理，支持 X-Proxy-Session |
-| 站点隔离 | 按目标站分组代理质量评分 |
-| 源质关闸 | 低质源自动屏蔽（S+A+B 率 <30% 即隔离） |
-| 前端筛选 | 实时按国家/城市/协议/延迟/评级筛选，窗口分页，SPA 响应式 |
-| 代理网关 | 内置 HTTP :8080 / SOCKS5 :1080 转发 |
+| 采集 | **20+** 源（ProxyScrape / GitHub 代理列表 / 快代理 / 89ip 等），采集阶段筛选：无端口+协议的丢弃，TCP 连通性预检 |
+| 验证 | 50 线程并发 TCP+HTTP 验证，**<500ms 保留，≥500ms 直接删除**（无 S/A/B/C/D 分层） |
+| GeoIP | **在线优先**：7 个 API 轮询（ip-api / ip9 / freeipapi / ipwhois / ipinfo / ipapi / ip2location）+ 代理池轮换防限流；离线 DB-IP 库兜底 |
+| 国内城市 | CN IP 专项：geoworker 每 60s 批量在线查询，返回中文省份+城市 |
+| 海外复测 | 海外代理走代理链二次验证，确保延迟数据真实 |
+| 前端 | SPA 单页应用：首页国旗+中文国名+节点数 → 点进钻取页筛选（协议/城市/延迟/搜索）→ 窗口分页 |
+| 进程守护 | dashboard.py 看门狗，子进程崩溃指数退避重启，稳定 2 分钟后重置 |
 
 ## 🏗 架构
 
 ```
-采集引擎（35源）──→ Redis ──→ backend:5051 ──→ frontend:5050
-                     │              │
-                proxy:ip:port   geo.py (离线IP库 + 在线API fallback)
-                     │              │
-                validator     data/ipdb.bin (355K条)
+                    ┌─────────────┐
+                    │  dashboard  │  PID 1 看门狗
+                    └──┬──┬──┬────┘
+          ┌────────────┘  │  └────────────┐
+          ▼               ▼               ▼
+  ┌───────────┐   ┌───────────┐   ┌───────────┐
+  │ validator │   │  backend  │   │ frontend  │
+  │  30s/轮   │   │  :5051    │   │  :5050    │
+  │ 验证+清理  │   │ API+缓存  │   │ 静态+反代 │
+  └─────┬─────┘   └─────┬─────┘   └───────────┘
+        │               │
+        ▼               ▼
+  ┌─────────────────────────────┐
+  │          Redis (DB 1)       │
+  │  proxies:pool (ZSET 信用分) │
+  │  proxy:{ip}:{port} (Hash)   │
+  │  geo:{ip} (Geo缓存 7天TTL)  │
+  └──────────┬──────────────────┘
+             │
+    ┌────────┴────────┐
+    │   geo.py        │
+    │ 在线API(7个)     │
+    │ +离线DB-IP兜底   │
+    │ +代理池轮换      │
+    └────────┬────────┘
+             │
+    ┌────────┴────────┐
+    │  new_fetcher.py  │
+    │ 20+源 并发采集    │
+    │ TCP预检 + 去重   │
+    └─────────────────┘
 ```
-
-| 组件 | 端口 | 说明 |
-|------|------|------|
-| `proxy-redis` | 6379 | ZSET 信用分 + Hash 元数据 |
-| `backend.py` | 5051 | 纯 API + 多线程服务 |
-| `frontend.py` | 5050 | 静态文件 + /api 反代 |
-| `validator.py` | — | 后台验证引擎，30s 一轮 |
-| `geo.py` | — | GeoIP：离线 DB-IP → Redis 缓存 → ip-api/ip9/freeipapi/ipwhois |
 
 ## 📦 快速开始
 
@@ -48,34 +65,34 @@ docker-compose up -d
 | 服务 | 地址 |
 |------|------|
 | 🖥 Dashboard | http://localhost:5050 |
-| 📡 API | http://localhost:5051/api/proxies |
-| 🔌 HTTP 代理 | `http://localhost:8080` |
-| 🧦 SOCKS5 代理 | `socks5://localhost:1080` |
+| 📡 API | http://localhost:5050/api/proxies |
+| 📊 统计 | http://localhost:5050/api/stats |
 
 ## 🔌 API
 
 ### GET `/api/proxies`
 
+所有代理均为 S 级（<500ms），不需要 grade 参数。
+
 | 参数 | 说明 |
 |------|------|
-| `grade` | `s`/`a`/`b`/`c`/`d` |
-| `country` | `CN`中国 / `!CN`海外 |
-| `region` | 城市/地区关键词匹配 |
-| `location` | 同 region，别名 |
-| `protocol` | `http`/`https`/`socks4`/`socks5` |
-| `delay` | 延迟上限ms，如 `delay=1000` |
-| `search` | IP模糊搜索 |
-| `sort` / `order` | `delay`/`grade` + `asc`/`desc` |
-| `page` / `limit` | 分页，默认50，最大200 |
+| `country` | 国家代码：`CN` 中国 / `US` 美国 / `!CN` 海外，默认全部 |
+| `location` | 城市/地区关键词匹配（中文），如 `location=杭州` |
+| `protocol` | `http` / `https` / `socks4` / `socks5` |
+| `delay` | 延迟上限（ms），如 `delay=500` |
+| `search` | IP 模糊搜索 |
+| `sort` | `delay` / `credit`，默认 `delay` |
+| `order` | `asc` / `desc`，默认 `asc` |
+| `page` / `limit` | 分页，默认 page=1 limit=50，最大 limit=200 |
 
 ```json
 {
-  "total": 35200, "filtered": 156,
+  "total": 25000, "total_matched": 2074,
   "proxies": [{
     "ip": "123.45.67.89", "port": "8080",
-    "protocol": "http", "delay": 234, "grade": "s",
-    "region": "CN", "location": "浙江 杭州",
-    "source": "github-xxx"
+    "protocol": "http", "delay": 234,
+    "country": "CN", "location": "浙江 杭州",
+    "credit": 35, "source": "proxyscrape"
   }]
 }
 ```
@@ -83,59 +100,83 @@ docker-compose up -d
 ### GET `/api/stats`
 
 ```json
-{"total":35200, "grades":{"s":1200,"a":2800,"b":3200,"c":10000,"d":18000}, "china":3400, "regions":{"CN":28000, "US":1200, …}}
+{
+  "total": 25894,
+  "grades": {"s": 25894},
+  "regions": {"CN": 12000, "US": 3000, "JP": 800, …}
+}
 ```
 
-## 🎯 评分机制
+### GET `/api/country/{code}`
 
-```
-S 级:  <500ms   (延迟极低)
-A 级:  <1s      (优秀)
-B 级:  <3s      (良好)
-C 级:  <5s      (一般)
-D 级:  ≥5s 或验证失败 (差)
-```
+钻取指定国家的所有代理，参数同 `/api/proxies`。
 
-信用分系统：新代理 +20，验证通过 +5，请求成功 +5（上限 100），连接失败 -30（进黑名单 5min），验证失败 -15，分数 ≤0 自动清理。
+## 🗺 GeoIP 管线（在线优先）
 
-## 🗺 GeoIP 管线
-
-1. **离线 DB-IP**（内存二分查找，3.6μs）—— 355K 条 IP 段，355 个国家/地区覆盖
-2. **Redis 缓存**（30 天 TTL）—— 在线 API 结果缓存
-3. **ip-api.com**（免费，150/min）—— 主力在线 API
-4. **ip9.com.cn** / **freeipapi.com** / **ipwhois.app**（备用 fallback）
-5. **代理轮换**：在线 API 遇 403/429 时从 Redis 代理池取 HTTP 代理轮换
-
-后台线程每月自动更新离线库。
+1. **Redis 缓存**（7 天 TTL）—— 命中直接返回，零延迟
+2. **在线 API 轮询**（7 个）—— ip-api → ip9 → freeipapi → ipwhois → ipinfo → ipapi → ip2location
+3. **代理池轮换**—— API 返回 403/429 时，从 Redis 代理池取 HTTP 代理重新请求
+4. **离线 DB-IP**—— 兜底，355K 条 IP 段，内存二分查找，3.6μs/次
+5. **CN 专项**—— 每分钟批量在线查询国内 IP 城市信息，显示中文省份+城市
 
 ## 📂 代码结构
 
 ```
 proxy-pool-dashboard/
-├── backend.py          # API 服务 + 数据加载 + 缓存
-├── frontend.py         # 静态文件服务 + 反代
-├── geo.py              # GeoIP 解析（离线 + 在线 fallback）
-├── validator.py        # 后台验证引擎（TCP + HTTP 两阶段）
-├── new_fetcher.py      # 采集引擎（35 源并发拉取）
-├── dashboard.py        # PID 1 看门狗（进程管理 + 崩溃重启）
+├── dashboard.py        # PID 1 看门狗：启动3子进程 + 崩溃指数退避重启
+├── new_fetcher.py      # 采集引擎：20+ 源并发拉取，TCP预检，去重入库
+├── validator.py        # 验证引擎：50线程，<500ms保留，≥500ms删除，海外走代理复测
+├── geo.py              # GeoIP：7在线API + 离线DB-IP + Redis缓存 + 代理轮换
+├── backend.py          # API服务：多线程 HTTP，索引缓存，中文城市名显示
+├── frontend.py         # 静态文件 + /api 反代到 backend:5051
 ├── data/
-│   └── ipdb.bin        # 离线 IP 二进制库（355K 条）
+│   ├── ipdb.bin        # 离线 IP 二进制库（DB-IP Country Lite）
+│   └── ip2region.xdb   # ip2region 离线库（备用）
 ├── static/
 │   ├── index.html      # SPA 入口
-│   ├── app.js          # 前端逻辑（SPA 视图 + 筛选 + 分页）
+│   ├── app.js          # 前端逻辑：createElement 防 XSS，AbortController 防竞态
 │   └── style.css       # GitHub 暗色主题
 ├── docker-compose.yml
 ├── Dockerfile
-└── requirements.txt
+└── requirements.txt    # 仅 redis>=5.0
 ```
 
 ## 🔧 技术要点
 
-- **前后端筛选统一走后端**：region/protocol/search/speed 全通过 API 参数传给后端
-- **AbortController 防竞态**：快速切换筛选时取消旧请求
+- **严格阈值**：<500ms 保留，≥500ms 调用 `_remove_proxy()` 从 ZSET + Hash 双删，不做分层
+- **XSS 防护**：前端全部用 `createElement()` + `textContent`，无 `innerHTML` 注入点
+- **防竞态**：快速切换筛选时 AbortController 取消旧请求，避免结果错乱
 - **窗口分页**：10k+ 代理时最多显示 7 个页码按钮
-- **事件委托复制**：点击复制按钮不触发内联 onclick，走事件委托 + data 属性
-- **XSS 防护**：所有 innerHTML 注入点经过 escapeHtml()
-- **5s 缓存 TTL**：all_proxies() 返回带缓存，避免每次 150k 次 hgetall
-- **多线程 HTTP 服务**：ThreadingHTTPServer，避免单请求阻塞全服务
-- **启动预热**：启动时同步建缓存，首个用户不需等 30s
+- **索引缓存**：`all_proxies()` 60s TTL，`stats` 900s TTL，避免每次全量 hgetall
+- **多线程 HTTP**：ThreadingMixIn + daemon_threads，请求不互相阻塞
+- **启动预热**：backend 启动时同步建立索引缓存
+- **进程守护**：dashboard.py 指数退避重启（2s→4s→8s→…→60s 上限），稳定 120s 后重置
+- **Redis 连接池**：backend 用 connection_pool（线程安全），validator 50线程*4连接
+- **国内城市纯净度**：`_format_location()` + `location_display()` 双重过滤英文省份名和垃圾词汇（阿里/腾讯/百度/电信/联通/云等）
+
+## 🚀 部署说明
+
+### Docker Compose（标准）
+
+```bash
+docker-compose up -d
+```
+
+### 生产部署（自定义端口/网络）
+
+`docker-compose.yml` 默认暴露 5050。如需改端口，修改 `ports` 映射：
+
+```yaml
+ports:
+  - "8080:5050"
+```
+
+首次启动后，采集引擎自动运行，约 10-30 分钟后代理池达到可用规模。
+
+### 代理验证周期
+
+- 验证器每 30s 一轮，对未验证的新代理做 TCP+HTTP 测试
+- 已验证代理每 300s 重检一次
+- 新源采集每 30 分钟一次
+- CN IP 城市信息每分钟在线查询
+- Geo 离线库每月自动更新
