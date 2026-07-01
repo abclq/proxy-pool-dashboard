@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""验证引擎 — 只留 S 级 (<500ms)。海外走代理复测，慢的直接删。"""
+"""验证引擎 — 只留 S 级 (<500ms)。直连测试，慢的直接删。"""
 
-import redis, time, socket, threading, sys, os, datetime, json, random, struct
+import redis, time, socket, threading, sys, os, datetime, json, struct
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 KEY_POOL = "proxies:pool"
@@ -13,7 +13,6 @@ VALIDATE_TIMEOUT = 2
 CREDIT_MAX = 50
 SUBMIT_CHUNK = 1000
 S_LATENCY_MAX = 500  # 只留 <500ms
-OVERSEAS_PROXY = "172.18.0.1:10808"  # 本机代理，海外节点复测走这里
 
 POOL = redis.ConnectionPool(
     host=os.environ.get("REDIS_HOST", "proxy-redis"), port=6379, db=1,
@@ -125,41 +124,6 @@ def socks5_test(ip, port):
         pass
     return None
 
-# ── 走代理复测 ──
-def _pick_test_routes():
-    """返回本机代理地址 (10808)，用于海外节点复测"""
-    return [OVERSEAS_PROXY]
-
-def _http_test_via_proxy(ip, port, via_proxy=None):
-    """通过中间代理 via_proxy 测试目标代理 ip:port"""
-    if via_proxy is None:
-        via_proxy = OVERSEAS_PROXY
-    try:
-        via_ip, via_port = via_proxy.split(":", 1)
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(VALIDATE_TIMEOUT + 5)
-            t0 = time.time()
-            s.connect((via_ip, int(via_port)))
-            s.send(f"CONNECT {ip}:{port} HTTP/1.1\r\nHost: {ip}:{port}\r\n\r\n".encode())
-            resp = s.recv(4096)
-            if b"200" not in resp: return None
-            s.send(f"GET http://{TARGET_HOST}/ HTTP/1.1\r\nHost: {TARGET_HOST}\r\nConnection: close\r\n\r\n".encode())
-            data = b""
-            while True:
-                try:
-                    chunk = s.recv(4096)
-                    if not chunk: break
-                    data += chunk
-                except Exception: break
-            lat = int((time.time() - t0) * 1000)
-            if data and (b"HTTP/" in data or len(data) > 200):
-                return min(lat, 9999)
-    except Exception: pass
-    return None
-
-def _is_overseas(country):
-    return country and country not in ("CN", "?", "")
-
 def _remove_proxy(proxy_str):
     REDIS.zrem(KEY_POOL, proxy_str)
     REDIS.delete(f"{PFX_PROXY}{proxy_str}")
@@ -176,11 +140,6 @@ def validate_one(proxy_str, meta):
         port_str = parts[1] if len(parts) > 1 else "0"
     try: port = int(port_str)
     except Exception: return ("skipped", None)
-    country = (meta.get("country") or "").upper()
-    # Normalize: fetcher may store "中国" instead of "CN"
-    if country == "中国" or country == "CHINA": country = "CN"
-    elif country == "香港" or country == "HONG KONG": country = "HK"
-    elif country == "台湾" or country == "TAIWAN": country = "TW"
 
     # ── 协议自动探测 ──
     proto_changed = False
@@ -221,39 +180,11 @@ def validate_one(proxy_str, meta):
             credit_add(proxy_str, 5)
             return ("ok_s", "S")
         else:
-            # ❌ >= 500ms → 海外走代理复测
-            if _is_overseas(country) and proto in ("http", "https", "?"):
-                routes = _pick_test_routes()
-                for route in routes:
-                    new_lat = _http_test_via_proxy(ip, port, route)
-                    if new_lat is not None and new_lat < S_LATENCY_MAX:
-                        country_cc, city = resolve_geo_and_store(ip, proxy_str, force=False)
-                        hset_args = {
-                            "latency": str(new_lat), "last_check": now, "success_rate": "100",
-                            "country": country_cc, "location": city, "protocol": proto or "http"
-                        }
-                        REDIS.hset(f"{PFX_PROXY}{proxy_str}", mapping=hset_args)
-                        credit_add(proxy_str, 5)
-                        return ("ok_via_proxy", "S")
-            # >= 500ms: 直接删除
+            # ❌ >= 500ms: 直接删除
             _remove_proxy(proxy_str)
             return ("removed", None)
     else:
-        # 直连失败 → 海外走代理复测
-        if _is_overseas(country) and proto in ("http", "https", "?"):
-            routes = _pick_test_routes()
-            for route in routes:
-                new_lat = _http_test_via_proxy(ip, port, route)
-                if new_lat is not None and new_lat < S_LATENCY_MAX:
-                    country_cc, city = resolve_geo_and_store(ip, proxy_str, force=False)
-                    REDIS.hset(f"{PFX_PROXY}{proxy_str}", mapping={
-                        "latency": str(new_lat), "last_check": now, "success_rate": "100",
-                        "country": country_cc, "location": city, "protocol": proto or "http"
-                    })
-                    credit_add(proxy_str, 5)
-                    return ("ok_via_proxy", "S")
-
-        # 彻底失败: 直接删除
+        # 直连失败: 直接删除
         if geo_resolver:
             try: geo_resolver.resolve(ip)
             except Exception: pass
@@ -267,7 +198,7 @@ def validate_all(executor):
     if total == 0:
         print("[validate] pool empty"); return
 
-    results = {"ok_s": 0, "ok_via_proxy": 0, "fail": 0, "removed": 0,
+    results = {"ok_s": 0, "fail": 0, "removed": 0,
                "slow": 0, "skipped": 0, "S": 0}
     now_ts = time.time()
     to_check = []; skipped = 0
@@ -299,14 +230,13 @@ def validate_all(executor):
         try:
             status, grade = f.result(); checked += 1
             if status == "ok_s": results["ok_s"] += 1; results["S"] += 1
-            elif status == "ok_via_proxy": results["ok_via_proxy"] += 1; results["S"] += 1
             elif status == "removed": results["removed"] += 1
             elif status == "slow": results["slow"] += 1
             elif status == "fail": results["fail"] += 1
         except Exception: results["fail"] += 1
 
     print(f"[validate] checked={checked} skip={skipped} "
-          f"S_direct={results['ok_s']} S_via_proxy={results['ok_via_proxy']} "
+          f"S_direct={results['ok_s']} "
           f"fail={results['fail']} removed={results['removed']} "
           f"slow={results['slow']} total_S={results['S']}")
 
