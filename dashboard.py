@@ -28,7 +28,8 @@ os.chdir('/app')
 start("validator", [sys.executable, '-u', 'validator.py'])
 start("backend",   [sys.executable, 'backend.py'])
 start("frontend",  [sys.executable, 'frontend.py'])
-print('[dashboard] running: frontend :5050, backend :5051, validator bg')
+start("quality",   [sys.executable, '-u', 'quality.py'])
+print('[dashboard] running: frontend :5050, backend :5051, validator bg, quality bg')
 
 while True:
     try:
