@@ -10,7 +10,7 @@
 
 | 功能 | 说明 |
 |------|------|
-| 采集 | **20+** 源（ProxyScrape / GitHub 代理列表 / 快代理 / 89ip 等），采集阶段筛选：无端口+协议的丢弃，TCP 连通性预检 |
+| 采集 | **24** 源（ProxyScrape / GitHub 代理列表 / 快代理 / 89ip 等），采集阶段筛选：无端口+协议的丢弃，TCP 连通性预检；`fetch_github_multi()` 泛型多协议采集器消除重复代码 |
 | 验证 | 50 线程并发 TCP+HTTP 验证，**<500ms 保留，≥500ms 直接删除**（无 S/A/B/C/D 分层） |
 | GeoIP | **在线优先**：7 个 API 轮询（ip-api / ip9 / freeipapi / ipwhois / ipinfo / ipapi / ip2location）+ 代理池轮换防限流；离线 DB-IP 库兜底 |
 | 国内城市 | CN IP 专项：geoworker 每 60s 批量在线查询，返回中文省份+城市 |
@@ -124,7 +124,7 @@ docker-compose up -d
 ```
 proxy-pool-dashboard/
 ├── dashboard.py        # PID 1 看门狗：启动3子进程 + 崩溃指数退避重启
-├── new_fetcher.py      # 采集引擎：20+ 源并发拉取，TCP预检，去重入库
+├── new_fetcher.py      # 采集引擎：24 源并发拉取，TCP预检，去重入库；fetch_github_multi() 泛型多协议采集
 ├── validator.py        # 验证引擎：50线程，<500ms保留，≥500ms删除，海外走代理复测
 ├── geo.py              # GeoIP：7在线API + 离线DB-IP + Redis缓存 + 代理轮换
 ├── backend.py          # API服务：多线程 HTTP，索引缓存，中文城市名显示

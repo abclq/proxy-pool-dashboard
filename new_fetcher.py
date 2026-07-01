@@ -214,6 +214,25 @@ def fetch(url, timeout=12, json_response=False, use_proxy=False):
     return None
 
 # ═══════════════════════════════════════════════
+# 通用多协议 GitHub raw 列表采集（减少重复代码）
+# ═══════════════════════════════════════════════
+def fetch_github_multi(name, proto_urls, label):
+    """通用多协议 GitHub raw 列表采集器。
+    proto_urls: [(protocol, url), ...]
+    """
+    count = 0
+    for proto, url in proto_urls:
+        try:
+            text = fetch(url)
+            if text:
+                for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
+                    if add_proxy(f'{m.group(1)}:{m.group(2)}', label, protocol=proto):
+                        count += 1
+        except Exception:
+            pass
+    return count
+
+# ═══════════════════════════════════════════════
 # ProxyScrape API
 # ═══════════════════════════════════════════════
 def fetch_proxyscrape():
@@ -329,51 +348,23 @@ def fetch_openproxylist():
     return count
 
 def fetch_murongpig():
-    count = 0
-    urls = [
-        ('https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt', 'murongpig', 'http'),
-        ('https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks4.txt', 'murongpig', 'socks4'),
-        ('https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt', 'murongpig', 'socks5'),
-    ]
-    for url, src, proto in urls:
-        try:
-            text = fetch(url)
-            if text:
-                for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
-                    if add_proxy(f'{m.group(1)}:{m.group(2)}', src, protocol=proto):
-                        count += 1
-        except Exception:
-            pass
-    return count
+    return fetch_github_multi("MuRongPIG", [
+        ('http',   'https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt'),
+        ('socks4', 'https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks4.txt'),
+        ('socks5', 'https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt'),
+    ], 'murongpig')
 
 def fetch_vmheaven():
-    count = 0
-    for proto, url in [
-        ('http', 'https://raw.githubusercontent.com/vmheaven/VMHeaven.io-Free-Proxy-List/main/http.txt'),
+    return fetch_github_multi("VMHeaven", [
+        ('http',   'https://raw.githubusercontent.com/vmheaven/VMHeaven.io-Free-Proxy-List/main/http.txt'),
         ('socks4', 'https://raw.githubusercontent.com/vmheaven/VMHeaven.io-Free-Proxy-List/main/socks4.txt'),
         ('socks5', 'https://raw.githubusercontent.com/vmheaven/VMHeaven.io-Free-Proxy-List/main/socks5.txt'),
-    ]:
-        try:
-            text = fetch(url)
-            if text:
-                for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
-                    if add_proxy(f'{m.group(1)}:{m.group(2)}', 'vmheaven', protocol=proto):
-                        count += 1
-        except Exception:
-            pass
-    return count
+    ], 'vmheaven')
 
 def fetch_proxifly_gh():
-    count = 0
-    try:
-        text = fetch('https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt')
-        if text:
-            for m in re.finditer(r'(\d+\.\d+\.\d+\.\d+):(\d+)', text):
-                if add_proxy(f'{m.group(1)}:{m.group(2)}', 'proxifly-gh', protocol="http"):
-                    count += 1
-    except Exception:
-        pass
-    return count
+    return fetch_github_multi("proxifly", [
+        ('http', 'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt'),
+    ], 'proxifly-gh')
 
 def fetch_jiliu():
     count = 0
