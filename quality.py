@@ -44,7 +44,7 @@ QUALITY_THREADS = 30       # 并发数
 QUALITY_TIMEOUT = 8        # 单次检测超时
 TEST_URL = "http://httpbin.org/ip"
 TEST_URL_HTTPS = "https://httpbin.org/ip"
-MIN_QUALITY_SCORE = 60     # 低于此分删除
+MIN_QUALITY_SCORE = 50     # 低于此分删除（含风险扣分）
 
 # ── 匿名级别定义 ──
 ANON_ELITE = "elite"       # 不泄露任何头
@@ -83,6 +83,22 @@ RISK_LOW = "low"
 RISK_MEDIUM = "medium"
 RISK_HIGH = "high"
 
+# ── ip-api.com 速率控制 (免费 45 req/min → 留余量 35) ──
+_ip_api_lock = threading.Lock()
+_ip_api_last_req = 0.0
+IP_API_MIN_INTERVAL = 60.0 / 35  # ~1.7s per request
+
+
+def _rate_limit_ip_api():
+    """阻塞直到可以发送下一个 ip-api 请求"""
+    global _ip_api_last_req
+    with _ip_api_lock:
+        now = time.time()
+        wait = _ip_api_last_req + IP_API_MIN_INTERVAL - now
+        if wait > 0:
+            time.sleep(wait)
+        _ip_api_last_req = time.time()
+
 
 def _reverse_ip(ip):
     """反转 IP 用于 DNSBL 查询：1.2.3.4 → 4.3.2.1"""
@@ -117,10 +133,52 @@ def check_dnsbl(ip, timeout=3):
 
 def check_ip_type(ip, timeout=5):
     """
-    通过 ip-api.com 判断 IP 类型：机房/住宅/移动。
-    免费 API：http://ip-api.com/json/<ip>?fields=isp,org,as,mobile,proxy,hosting
-    限制：45 req/min
+    判断 IP 类型：机房/住宅/移动。
+    优先用 Redis geo:{ip} 缓存（isp/org 等字段），不命中才走 ip-api.com API。
     """
+    # 1. 先查 Redis 缓存 geo:{ip}（支持 JSON 字符串和 hash 两种格式）
+    try:
+        geo_raw = R.get(f"geo:{ip}")
+    except Exception:
+        geo_raw = None
+    
+    geo = {}
+    if geo_raw:
+        try:
+            geo = json.loads(geo_raw)
+        except (json.JSONDecodeError, TypeError):
+            # 可能是 hash 类型，回退
+            try:
+                geo = R.hgetall(f"geo:{ip}")
+            except Exception:
+                geo = {}
+    if geo and geo.get("isp"):
+        isp = geo.get("isp", "")
+        org = geo.get("org", "")
+        as_name = geo.get("as", "")
+        is_hosting = geo.get("hosting") == "true"
+        is_mobile = geo.get("mobile") == "true"
+        
+        if is_mobile:
+            return IP_TYPE_MOBILE, {"isp": isp, "org": org, "as": as_name, "source": "redis"}
+        if is_hosting:
+            return IP_TYPE_DC, {"isp": isp, "org": org, "as": as_name, "source": "redis"}
+        
+        dc_keywords = [
+            "amazon", "google", "microsoft", "azure", "digitalocean",
+            "vultr", "linode", "hetzner", "ovh", "tencent", "alibaba",
+            "aliyun", "oracle", "cloudflare", "fastly", "akamai",
+            "choopa", "psychz", "colocrossing", "datacamp",
+            "hosting", "data center", "datacenter", "dedicated",
+            "rackspace", "softlayer", "leaseweb", "online.net",
+        ]
+        combined = f"{isp} {org} {as_name}".lower()
+        if any(kw in combined for kw in dc_keywords):
+            return IP_TYPE_DC, {"isp": isp, "org": org, "as": as_name, "source": "redis"}
+        return IP_TYPE_RESIDENTIAL, {"isp": isp, "org": org, "as": as_name, "source": "redis"}
+
+    # 2. 回退：Redis 无缓存 → 调 ip-api API（有速率限制）
+    _rate_limit_ip_api()
     try:
         url = f"http://ip-api.com/json/{ip}?fields=isp,org,as,mobile,proxy,hosting"
         req = urllib.request.Request(url, headers={"User-Agent": "proxy-pool-quality/1.0"})
@@ -132,18 +190,15 @@ def check_ip_type(ip, timeout=5):
 
         is_hosting = data.get("hosting", False)
         is_mobile = data.get("mobile", False)
-        is_proxy = data.get("proxy", False)
         isp = data.get("isp", "")
         org = data.get("org", "")
         as_name = data.get("as", "")
 
-        # 判断类型
         if is_mobile:
             ip_type = IP_TYPE_MOBILE
         elif is_hosting:
             ip_type = IP_TYPE_DC
         else:
-            # 进一步判断：知名云服务商 AS
             dc_keywords = [
                 "amazon", "google", "microsoft", "azure", "digitalocean",
                 "vultr", "linode", "hetzner", "ovh", "tencent", "alibaba",
@@ -153,23 +208,14 @@ def check_ip_type(ip, timeout=5):
                 "rackspace", "softlayer", "leaseweb", "online.net",
             ]
             combined = f"{isp} {org} {as_name}".lower()
-            if any(kw in combined for kw in dc_keywords):
-                ip_type = IP_TYPE_DC
-            else:
-                ip_type = IP_TYPE_RESIDENTIAL
+            ip_type = IP_TYPE_DC if any(kw in combined for kw in dc_keywords) else IP_TYPE_RESIDENTIAL
 
-        return ip_type, {
-            "isp": isp,
-            "org": org,
-            "as": as_name,
-            "hosting": is_hosting,
-            "mobile": is_mobile,
-            "proxy": is_proxy,
-            "is_datacenter": ip_type == IP_TYPE_DC,
-        }
+        return ip_type, {"isp": isp, "org": org, "as": as_name,
+                         "hosting": is_hosting, "mobile": is_mobile,
+                         "is_datacenter": ip_type == IP_TYPE_DC, "source": "ip-api"}
 
     except Exception as e:
-        return IP_TYPE_UNKNOWN, {"error": str(e)[:100]}
+        return IP_TYPE_UNKNOWN, {"error": str(e)[:100], "source": "error"}
 
 
 def assess_risk_ip(ip, timeout=5):
@@ -361,14 +407,33 @@ def score_proxy(check_result, risk=None):
 
 
 def check_single(proxy_key):
-    """检测单个代理"""
+    """检测单个代理。返回结果 dict 或 None（跳过时）"""
+    # 优先读 proxy:ip:port key（真正存数据的地方），ZSET key 没有 ip/port
+    data_key = f"proxy:{proxy_key}"
     try:
-        hd = R.hgetall(proxy_key)
+        hd = R.hgetall(data_key)
     except Exception:
-        return None
+        hd = {}
 
     if not hd:
-        return None
+        # 回退到 ZSET key 本身
+        data_key = proxy_key
+        try:
+            hd = R.hgetall(data_key)
+        except Exception:
+            hd = {}
+
+    if not hd:
+        # 最后尝试从 key 中提取 IP 和 port
+        if "proxy:" in proxy_key:
+            raw = proxy_key.replace("proxy:", "")
+        else:
+            raw = proxy_key
+        parts = raw.rsplit(":", 1)
+        if len(parts) == 2:
+            hd = {"ip": parts[0], "port": parts[1], "protocol": "http"}
+        else:
+            return None
 
     ip = hd.get("ip", "")
     port = hd.get("port", "")
@@ -409,7 +474,7 @@ def check_single(proxy_key):
 
     # 写回 Redis
     try:
-        R.hset(proxy_key, mapping={
+        R.hset(data_key, mapping={
             "quality_score": str(score),
             "anonymity": result["anonymity"] or "unknown",
             "risk_level": risk.get("risk_level", RISK_HIGH),
@@ -421,10 +486,10 @@ def check_single(proxy_key):
         pass
 
     # 低分直接删
-    if score < MIN_QUALITY_SCORE and hd.get("validator_ok"):
+    if score < MIN_QUALITY_SCORE:
         try:
             R.zrem(KEY_POOL, proxy_key)
-            R.delete(proxy_key)
+            R.delete(data_key)
         except Exception:
             pass
 
@@ -436,12 +501,43 @@ def check_single(proxy_key):
 
 def run_once():
     """一轮检测"""
-    all_keys = R.zrangebyscore(KEY_POOL, 0, 100)
+    # 只测已验证代理 (validator_ok=1) + 未检测过质量的
+    all_keys = R.zrangebyscore(KEY_POOL, 1, 100)
     if not all_keys:
         print(f"[quality] pool empty, nothing to check")
         return
 
-    print(f"[quality] pool={len(all_keys)}, checking...")
+    # 过滤：必须有 validator_ok 或 latency 或 success_rate
+    need_check = []
+    skipped = 0
+    batch_size = 500  # 每轮最多测 500 个
+    for k in all_keys:
+        if len(need_check) >= batch_size:
+            break
+        # 优先读 proxy:IP:PORT key（新数据都在这里）
+        alt_key = f"proxy:{k}"
+        try:
+            hd = R.hgetall(alt_key)
+            if not hd:
+                hd = R.hgetall(k)
+        except Exception:
+            try:
+                hd = R.hgetall(k)
+            except Exception:
+                continue
+        if not hd:
+            continue
+        qs = hd.get("quality_score", "")
+        if (not qs or not qs.isdigit() or int(qs) < MIN_QUALITY_SCORE):
+            need_check.append(k)
+        else:
+            skipped += 1
+
+    if not need_check:
+        print(f"[quality] all {skipped} proxies already checked, skip")
+        return
+
+    print(f"[quality] pool={len(all_keys)}, need_check={len(need_check)} (skipped={skipped}), checking...")
 
     checked = 0
     passed = 0
@@ -451,7 +547,7 @@ def run_once():
     dc_count = 0
 
     with ThreadPoolExecutor(max_workers=QUALITY_THREADS) as ex:
-        futures = {ex.submit(check_single, k): k for k in all_keys}
+        futures = {ex.submit(check_single, k): k for k in need_check}
         for future in as_completed(futures):
             r = future.result()
             if r is None:
@@ -471,6 +567,32 @@ def run_once():
     pct = (passed / checked * 100) if checked else 0
     print(f"[quality] done: checked={checked} passed={passed}({pct:.0f}%) "
           f"failed={failed} elite={elite} low_risk={low_risk} dc={dc_count} pool={len(all_keys)}")
+
+    # ── 批量清理已验证的死代理（有 quality_score=0 但没被 check_single 自动删的）──
+    if failed > 0:
+        _purge_dead_proxies(all_keys[:500])
+
+
+def _purge_dead_proxies(keys_sample):
+    """清理池中的死代理：quality_score=0 且 latency 为空或 >5000ms"""
+    dead = 0
+    for k in keys_sample:
+        try:
+            hd = R.hgetall(f"proxy:{k}")
+            if not hd:
+                hd = R.hgetall(k)
+        except Exception:
+            continue
+        qs = hd.get("quality_score", "")
+        if qs == "0":
+            try:
+                R.zrem(KEY_POOL, k)
+                R.delete(f"proxy:{k}", k)
+                dead += 1
+            except Exception:
+                pass
+    if dead > 0:
+        print(f"[quality] purged {dead} dead proxies")
 
 
 def main():
